@@ -163,16 +163,8 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
         content: { type: "text" as const, text: m.content },
       }));
 
-    // Prepend system content to first user message (SDK doesn't support system field)
-    if (systemContent && chatMessages.length > 0 && chatMessages[0].role === "user") {
-      chatMessages[0] = {
-        ...chatMessages[0],
-        content: { type: "text", text: `[System]\n${systemContent}\n\n[User]\n${chatMessages[0].content.text}` },
-      };
-    }
-
     const result = await mcpServer!.createMessage(
-      { messages: chatMessages, maxTokens: 1024 },
+      { messages: chatMessages, systemPrompt: systemContent, maxTokens: 1024 },
       { timeout: 120_000 }
     );
 

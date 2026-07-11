@@ -47,6 +47,7 @@ Mini Agent MCP 是一个集成了 ReAct 小型 Agent 的 MCP (Model Context Prot
       "args": ["mini-agent-mcp"],
       "env": {
         "ANYSEARCH_API_KEY": "",
+        "LLM_API_FORMAT": "openai",
         "LLM_API_KEY": "",
         "LLM_BASE_URL": "",
         "LLM_MODEL": ""
