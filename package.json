@@ -1,0 +1,42 @@
+{
+  "name": "mini-agent-mcp",
+  "version": "1.0.0",
+  "description": "MCP server with an integrated ReAct mini-agent that autonomously uses tools. Includes AnySearch integration for web search and multi-model LLM communication via MCP sampling.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mini-agent-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "node dist/index.js --test",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "react-agent",
+    "llm",
+    "ai-agent",
+    "search",
+    "anysearch",
+    "multi-model",
+    "sampling"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
