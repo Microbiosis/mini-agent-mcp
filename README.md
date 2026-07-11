@@ -37,7 +37,7 @@ Mini Agent MCP 是一个集成了 ReAct 小型 Agent 的 MCP (Model Context Prot
 
 将以下 JSON 配置添加到您的 MCP 客户端配置文件中：
 
-#### ZCode / Claude Desktop / Cursor / VS Code
+#### ZCode
 
 ```json
 {
@@ -47,29 +47,42 @@ Mini Agent MCP 是一个集成了 ReAct 小型 Agent 的 MCP (Model Context Prot
       "command": "npx",
       "args": ["mini-agent-mcp"],
       "env": {
-        "ANYSEARCH_API_KEY": ""
+        "ANYSEARCH_API_KEY": "",
+        "LLM_API_KEY": "",
+        "LLM_BASE_URL": "",
+        "LLM_MODEL": ""
       }
     }
   }
 }
 ```
 
-> 在 ZCode 中使用时，Agent 自动使用 ZCode 的 LLM（MCP Sampling），**无需配置 `LLM_*` 环境变量**。
+> 在 ZCode 中使用时，Agent 优先使用 MCP Sampling（ZCode 的 LLM）。配置 `LLM_*` 后可作为回退：Sampling 失败时自动切换到 Direct HTTP。
 
-### 方式 2: 独立运行（Direct HTTP）
+### 方式 2: Direct HTTP（回退）
 
-当无法使用 MCP Sampling 时，配置环境变量让服务器直接调用 LLM API：
+当 MCP Sampling 不可用时，配置环境变量让服务器直接调用 LLM API：
 
-```bash
-# OpenAI 格式（LongCat / SenseNova / OpenAI / DeepSeek / kimi / Ollama）
-set LLM_API_FORMAT=openai
-set LLM_API_KEY=your-key
-set LLM_BASE_URL=https://api.longcat.chat/openai
-set LLM_MODEL=LongCat-2.0-Preview
-
-# 启动
-node dist/index.js
+```json
+{
+  "mcpServers": {
+    "mini-agent-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["mini-agent-mcp"],
+      "env": {
+        "ANYSEARCH_API_KEY": "",
+        "LLM_API_FORMAT": "openai",
+        "LLM_API_KEY": "your-key",
+        "LLM_BASE_URL": "https://api.longcat.chat/openai",
+        "LLM_MODEL": "LongCat-2.0-Preview"
+      }
+    }
+  }
+}
 ```
+
+> `LLM_API_FORMAT` 可选：`openai`（LongCat/SenseNova/OpenAI）或 `anthropic`（LongCat-Anthropic/SenseNova-Anthropic）。不填则自动识别。
 
 ### 方式 3: 本地开发
 
