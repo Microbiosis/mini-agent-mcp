@@ -52,7 +52,7 @@ async function getClient(): Promise<Client> {
   client = new Client(
     {
       name: "mini-agent-mcp-anysearch",
-      version: "1.0.9",
+      version: "1.0.10",
     },
     {
       capabilities: {},

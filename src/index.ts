@@ -71,6 +71,14 @@ async function runTests() {
   }
   console.log("");
 
+  // Show LLM env var status (for debugging)
+  console.log("--- LLM Environment ---");
+  console.log(`  LLM_API_KEY: ${process.env.LLM_API_KEY ? "SET (" + process.env.LLM_API_KEY.length + " chars)" : "NOT SET"}`);
+  console.log(`  LLM_BASE_URL: ${process.env.LLM_BASE_URL || "NOT SET"}`);
+  console.log(`  LLM_MODEL: ${process.env.LLM_MODEL || "NOT SET"}`);
+  console.log(`  LLM_API_FORMAT: ${process.env.LLM_API_FORMAT || "auto-detect"}`);
+  console.log("");
+
   // Test the agent
   console.log("--- Test: Agent (multi-step) ---");
   const agentResult = await agentTool.handler({
@@ -103,7 +111,7 @@ async function main() {
   const server = new Server(
     {
       name: "mini-agent-mcp",
-      version: "1.0.9",
+      version: "1.0.10",
     },
     {
       capabilities: {
