@@ -14,6 +14,10 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../../../package.json") as { version: string };
 
 const ANYSEARCH_MCP_URL = "https://api.anysearch.com/mcp";
 
@@ -52,7 +56,7 @@ async function getClient(): Promise<Client> {
   client = new Client(
     {
       name: "mini-agent-mcp-anysearch",
-      version: "1.0.10",
+      version,
     },
     {
       capabilities: {},

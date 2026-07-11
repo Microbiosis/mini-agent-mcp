@@ -29,6 +29,10 @@ import {
 import { buildToolList, rebuildToolMap } from "./tools/registry.js";
 import { agentTool } from "./agent/index.js";
 import { isLMAvailable, setLLMServer, getLLMMode } from "./agent/llm.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../../package.json") as { version: string };
 
 // Re-export for test mode
 export { agentTool };
@@ -111,7 +115,7 @@ async function main() {
   const server = new Server(
     {
       name: "mini-agent-mcp",
-      version: "1.0.10",
+      version,
     },
     {
       capabilities: {
