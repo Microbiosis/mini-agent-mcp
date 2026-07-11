@@ -155,13 +155,24 @@ export async function callLLM(messages: LLMMessage[]): Promise<LLMResponse> {
 
 async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
   try {
-    const samplingMessages = messages.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: { type: "text" as const, text: m.content },
-    }));
+    const systemContent = messages.find((m) => m.role === "system")?.content;
+    const chatMessages = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: { type: "text" as const, text: m.content },
+      }));
+
+    // Prepend system content to first user message (SDK doesn't support system field)
+    if (systemContent && chatMessages.length > 0 && chatMessages[0].role === "user") {
+      chatMessages[0] = {
+        ...chatMessages[0],
+        content: { type: "text", text: `[System]\n${systemContent}\n\n[User]\n${chatMessages[0].content.text}` },
+      };
+    }
 
     const result = await mcpServer!.createMessage(
-      { messages: samplingMessages, maxTokens: 1024 },
+      { messages: chatMessages, maxTokens: 1024 },
       { timeout: 120_000 }
     );
 

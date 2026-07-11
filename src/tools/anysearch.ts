@@ -75,10 +75,3 @@ export async function getAnySearchTools(): Promise<ToolDefinition[]> {
   }
 }
 
-/**
- * Check if AnySearch is available (has discoverable tools).
- */
-export async function isAnySearchEnabled(): Promise<boolean> {
-  const tools = await getAnySearchTools();
-  return tools.length > 0;
-}

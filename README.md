@@ -21,7 +21,7 @@ Mini Agent MCP 是一个集成了 ReAct 小型 Agent 的 MCP (Model Context Prot
 
 ## 服务描述
 
-基于 MCP 协议的智能代理服务器，集成了 6 个内置工具（计算器、文本分析、单位转换、日期时间、随机生成、ReAct Agent）和 4 个 AnySearch 搜索工具。支持多步推理（最多 8 步），可自主组合调用工具完成任务。支持 MCP Sampling 多模型通信，无需服务器端 API Key 即可调用 LLM。
+基于 MCP 协议的智能代理服务器，集成了 7 个内置工具（计算器、文本分析、文本转换、单位转换、日期时间、随机生成、ReAct Agent）和 4 个 AnySearch 搜索工具。支持多步推理（最多 8 步），可自主组合调用工具完成任务。支持 MCP Sampling 多模型通信，无需服务器端 API Key 即可调用 LLM。
 
 ## ✨ 核心功能
 

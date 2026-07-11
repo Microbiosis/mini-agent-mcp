@@ -133,19 +133,7 @@ export async function callAnySearchTool(
 }
 
 /**
- * Check if AnySearch is reachable and available.
- */
-export async function isAnySearchAvailable(): Promise<boolean> {
-  try {
-    await listAnySearchTools();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Close the AnySearch MCP connection.
+ * Close the AnySearch MCP connection (for graceful shutdown).
  */
 export async function closeAnySearch(): Promise<void> {
   if (client) {

@@ -29,6 +29,7 @@ import {
 import { buildToolList, rebuildToolMap } from "./tools/registry.js";
 import { agentTool } from "./agent/index.js";
 import { isLMAvailable, setLLMServer, getLLMMode } from "./agent/llm.js";
+import { closeAnySearch } from "./tools/anysearch-client.js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -252,6 +253,15 @@ async function main() {
         console.error(`    - MCP sampling: no client sampling support, OR`);
         console.error(`    - Set LLM_API_KEY + LLM_BASE_URL + LLM_MODEL for direct HTTP`);
       }
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.error("[Shutdown] Closing connections...");
+    await closeAnySearch();
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 }
 
 main().catch((err) => {
