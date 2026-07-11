@@ -29,16 +29,15 @@ import {
 import { buildToolList, rebuildToolMap } from "./tools/registry.js";
 import { agentTool } from "./agent/index.js";
 import { isLMAvailable, setLLMServer, getLLMMode } from "./agent/llm.js";
-import { createRequire } from "node:module";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const { version } = require("../../package.json") as { version: string };
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const packageJsonPath = resolve(__dirname, "..", "package.json");
+const { version } = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
 
 // ─── Load .env file (fallback for clients that don't pass env vars) ─────────
-const __dirname = dirname(fileURLToPath(import.meta.url));
 function loadEnvFile(): void {
   const envPaths = [
     resolve(process.cwd(), ".env"),

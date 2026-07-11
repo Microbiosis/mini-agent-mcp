@@ -14,10 +14,13 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const { version } = require("../../../package.json") as { version: string };
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const packageJsonPath = resolve(__dirname, "..", "..", "package.json");
+const { version } = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
 
 const ANYSEARCH_MCP_URL = "https://api.anysearch.com/mcp";
 
