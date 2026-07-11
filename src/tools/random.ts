@@ -4,7 +4,7 @@
 
 import type { ToolDefinition } from "./types.js";
 import { textResult } from "./types.js";
-import * as crypto from "crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 
 export const randomGenTool: ToolDefinition = {
   name: "random_gen",
@@ -71,7 +71,7 @@ export const randomGenTool: ToolDefinition = {
       }
 
       case "uuid": {
-        const uuid = crypto.randomUUID();
+        const uuid = randomUUID();
         return textResult(`UUID v4: ${uuid}`);
       }
 
@@ -87,7 +87,7 @@ export const randomGenTool: ToolDefinition = {
         if (useUpper) charset += uppercase;
         if (useSymbols) charset += symbols;
 
-        const bytes = crypto.randomBytes(len);
+        const bytes = randomBytes(len);
         let password = "";
         for (let i = 0; i < len; i++) {
           password += charset[bytes[i] % charset.length];

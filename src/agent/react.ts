@@ -15,7 +15,7 @@
 
 import { allTools, getTool, getToolDescriptions, buildToolList } from "../tools/registry.js";
 import type { ToolResult } from "../tools/types.js";
-import { callLLM, getLLMConfig, isLMAvailable, isSamplingAvailable, getLLMMode, type LLMMessage } from "./llm.js";
+import { callLLM, getLLMConfig, getLLMMode, type LLMMessage } from "./llm.js";
 
 export interface AgentStep {
   thought: string;
@@ -109,7 +109,6 @@ function parseLLMResponse(response: string): AgentStep {
  * Run the ReAct loop with an LLM.
  */
 async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<AgentResult> {
-  const config = mode === "http" ? getLLMConfig()! : undefined;
   const steps: AgentStep[] = [];
 
   // Discover all tools including AnySearch for the LLM
@@ -128,11 +127,17 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
 
   for (let i = 0; i < MAX_STEPS; i++) {
     // Call LLM (via MCP sampling or direct HTTP)
-    const llmResponse = await callLLM(messages, config);
-    messages.push({ role: "assistant", content: llmResponse });
+    const llmResponse = await callLLM(messages);
+
+    // If LLM failed, abort the loop
+    if (llmResponse.error) {
+      throw new Error(llmResponse.errorMessage || "LLM call failed");
+    }
+
+    messages.push({ role: "assistant", content: llmResponse.content });
 
     // Parse response
-    const step = parseLLMResponse(llmResponse);
+    const step = parseLLMResponse(llmResponse.content);
     steps.push(step);
 
     // Check for final answer
@@ -184,13 +189,26 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
     role: "user",
     content: "Maximum steps reached. Please provide your Final Answer based on what you know so far.",
   });
-  const finalResponse = await callLLM(messages, config);
-  const finalStep = parseLLMResponse(finalResponse);
+  const finalResponse = await callLLM(messages);
+
+  if (finalResponse.error) {
+    // Even on error, return what we have
+    return {
+      success: true,
+      answer: steps[steps.length - 1]?.finalAnswer || "Max steps reached with LLM error.",
+      steps,
+      totalSteps: steps.length,
+      llmPowered: true,
+      llmMode: mode,
+    };
+  }
+
+  const finalStep = parseLLMResponse(finalResponse.content);
   steps.push(finalStep);
 
   return {
     success: true,
-    answer: finalStep.finalAnswer || finalResponse,
+    answer: finalStep.finalAnswer || finalResponse.content,
     steps,
     totalSteps: steps.length,
     llmPowered: true,
@@ -437,16 +455,45 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
 export async function runAgent(task: string): Promise<AgentResult> {
   const mode = getLLMMode();
 
-  if (mode !== "none") {
+  if (mode === "sampling") {
+    // 1) Try MCP sampling first
     try {
-      return await runLLMAgent(task, mode);
+      return await runLLMAgent(task, "sampling");
+    } catch (samplingErr) {
+      // 2) Sampling failed — try Direct HTTP if env vars are configured
+      const httpConfig = getLLMConfig();
+      if (httpConfig) {
+        try {
+          return await runLLMAgent(task, "http");
+        } catch (httpErr) {
+          // 3) Direct HTTP also failed — fall back to rule-based
+          const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
+          const hMsg = httpErr instanceof Error ? httpErr.message : String(httpErr);
+          const result = await runRuleBasedAgent(task);
+          result.answer = `[LLM errors: sampling (${sMsg}), http (${hMsg})] — falling back to rule-based mode.\n\n${result.answer}`;
+          return result;
+        }
+      }
+      // No Direct HTTP config — fall back to rule-based
+      const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
+      const result = await runRuleBasedAgent(task);
+      result.answer = `[Sampling error: ${sMsg}] — falling back to rule-based mode.\n\n${result.answer}`;
+      return result;
+    }
+  }
+
+  if (mode === "http") {
+    // Direct HTTP only (no sampling available)
+    try {
+      return await runLLMAgent(task, "http");
     } catch (err) {
-      // If LLM fails, fall back to rule-based
       const msg = err instanceof Error ? err.message : String(err);
       const result = await runRuleBasedAgent(task);
       result.answer = `[LLM error: ${msg}] — falling back to rule-based mode.\n\n${result.answer}`;
       return result;
     }
   }
+
+  // Rule-based only (no LLM available)
   return await runRuleBasedAgent(task);
 }

@@ -14,10 +14,10 @@
  *   node dist/index.js --test    — Run built-in tests
  *
  * Environment variables:
- *   LLM_API_KEY / OPENAI_API_KEY   — API key for LLM-powered agent
- *   LLM_BASE_URL / OPENAI_BASE_URL — LLM base URL
- *   LLM_MODEL / OPENAI_MODEL       — LLM model name
- *   ANYSEARCH_API_KEY              — AnySearch API key (optional, anonymous works)
+ *   LLM_API_KEY   — API key
+ *   LLM_BASE_URL  — LLM base URL
+ *   LLM_MODEL     — LLM model name
+ *   ANYSEARCH_API_KEY — AnySearch API key (optional, anonymous works)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -103,7 +103,7 @@ async function main() {
   const server = new Server(
     {
       name: "mini-agent-mcp",
-      version: "1.0.0",
+      version: "1.0.9",
     },
     {
       capabilities: {
