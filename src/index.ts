@@ -156,24 +156,41 @@ async function main() {
       };
     }
 
-    try {
-      const result = await tool.handler(args || {});
-      return {
-        content: result.content.map((c) => {
-          if (c.type === "json") {
-            return { type: "text" as const, text: JSON.stringify(c.json, null, 2) };
-          }
-          return { type: "text" as const, text: c.text };
-        }),
-        isError: result.isError,
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text" as const, text: `Error executing tool '${name}': ${msg}` }],
-        isError: true,
-      };
+    // Retry up to 3 times on failure (handles transient network timeouts)
+    const maxRetries = 3;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await tool.handler(args || {});
+        return {
+          content: result.content.map((c) => {
+            if (c.type === "json") {
+              return { type: "text" as const, text: JSON.stringify(c.json, null, 2) };
+            }
+            return { type: "text" as const, text: c.text };
+          }),
+          isError: result.isError,
+        };
+      } catch (err) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[Tool '${name}' attempt ${attempt}/${maxRetries}] Error: ${msg}`);
+
+        if (attempt < maxRetries) {
+          // Exponential backoff: 1s, 2s, 4s
+          const delay = 1000 * Math.pow(2, attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
     }
+
+    // All retries exhausted
+    const msg = lastError instanceof Error ? lastError.message : String(lastError);
+    return {
+      content: [{ type: "text" as const, text: `Error executing tool '${name}' after ${maxRetries} attempts: ${msg}` }],
+      isError: true,
+    };
   });
 
   // Start MCP server
