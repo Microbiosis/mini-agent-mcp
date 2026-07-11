@@ -180,19 +180,19 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Log to stderr (stdout is reserved for MCP protocol)
-  console.error(`Mini Agent MCP server started`);
-  console.error(`  Tools: ${allServerTools.map((t) => t.name).join(", ")}`);
-  const mode = getLLMMode();
-  if (mode === "sampling") {
-    console.error(`  LLM: MCP sampling (client manages model)`);
-  } else if (mode === "http") {
-    console.error(`  LLM: direct HTTP (${process.env.LLM_MODEL})`);
-  } else {
-    console.error(`  LLM: unavailable (rule-based mode)`);
-    console.error(`    - MCP sampling: no client sampling support, OR`);
-    console.error(`    - Set LLM_API_KEY + LLM_BASE_URL + LLM_MODEL for direct HTTP`);
-  }
+      // Log to stderr (stdout is reserved for MCP protocol)
+      console.error(`Mini Agent MCP server started (v${version})`);
+      console.error(`  Tools: ${allServerTools.map((t) => t.name).join(", ")}`);
+      const mode = getLLMMode();
+      if (mode === "sampling") {
+        console.error(`  LLM: MCP sampling (client manages model)`);
+      } else if (mode === "http") {
+        console.error(`  LLM: direct HTTP (${process.env.LLM_MODEL})`);
+      } else {
+        console.error(`  LLM: unavailable (rule-based mode)`);
+        console.error(`    - MCP sampling: no client sampling support, OR`);
+        console.error(`    - Set LLM_API_KEY + LLM_BASE_URL + LLM_MODEL for direct HTTP`);
+      }
 }
 
 main().catch((err) => {
