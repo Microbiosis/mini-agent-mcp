@@ -162,7 +162,7 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
 
     const result = await mcpServer!.createMessage(
       { messages: samplingMessages, maxTokens: 1024 },
-      { timeout: 60_000 }
+      { timeout: 120_000 }
     );
 
     const content = result.content;
