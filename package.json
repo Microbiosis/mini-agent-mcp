@@ -1,6 +1,6 @@
 {
   "name": "mini-agent-mcp",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "MCP server with an integrated ReAct mini-agent that autonomously uses tools. Includes AnySearch integration for web search and multi-model LLM communication via MCP sampling.",
   "type": "module",
   "main": "dist/index.js",
