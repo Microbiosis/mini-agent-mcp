@@ -30,9 +30,52 @@ import { buildToolList, rebuildToolMap } from "./tools/registry.js";
 import { agentTool } from "./agent/index.js";
 import { isLMAvailable, setLLMServer, getLLMMode } from "./agent/llm.js";
 import { createRequire } from "node:module";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../../package.json") as { version: string };
+
+// ─── Load .env file (fallback for clients that don't pass env vars) ─────────
+const __dirname = dirname(fileURLToPath(import.meta.url));
+function loadEnvFile(): void {
+  const envPaths = [
+    resolve(process.cwd(), ".env"),
+    resolve(__dirname, "..", ".env"),
+    resolve(__dirname, "..", "..", ".env"),
+  ];
+
+  for (const envPath of envPaths) {
+    if (existsSync(envPath)) {
+      try {
+        const content = readFileSync(envPath, "utf8");
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const eqIdx = trimmed.indexOf("=");
+          if (eqIdx === -1) continue;
+          const key = trimmed.slice(0, eqIdx).trim();
+          let value = trimmed.slice(eqIdx + 1).trim();
+          // Remove surrounding quotes
+          if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+          }
+          // Only set if not already set by parent process
+          if (!process.env[key]) {
+            process.env[key] = value;
+          }
+        }
+        console.error(`[Config] Loaded .env from ${envPath}`);
+        break;
+      } catch {
+        // Invalid .env, skip
+      }
+    }
+  }
+}
+
+loadEnvFile();
 
 // Re-export for test mode
 export { agentTool };
