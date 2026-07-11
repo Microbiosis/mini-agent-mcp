@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/mini-agent-mcp.svg?style=flat-square)](https://www.npmjs.com/package/mini-agent-mcp)
 [![GitHub license](https://img.shields.io/github/license/Microbiosis/mini-agent-mcp?style=flat-square)](https://github.com/Microbiosis/mini-agent-mcp/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Microbiosis/mini-agent-mcp?style=flat-square)](https://github.com/Microbiosis/mini-agent-mcp)
-[![MCP](https://img.shields.io/badge/MCP-compatible-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAyTDJsMTAgOGgxTEwxMiAyem0wIDIwTDEyIDEyaDEwbDEwLThMMTIgMjJ6Ii8+PC9zdmc+)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAyTDJsMTAgOGgxMEwxMiAyem0wIDIwTDEyIDEyaDEwbDEwLThMMTIgMjJ6Ii8+PC9zdmc+)](https://modelcontextprotocol.io)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen?style=flat-square&logo=nodedotjs)](https://nodejs.org)
 
 > **中文名称**: Mini Agent MCP 智能代理服务器  
@@ -30,12 +30,11 @@ Mini Agent MCP 是一个集成了 ReAct 小型 Agent 的 MCP (Model Context Prot
 - **🔍 AnySearch 搜索** — 通过 MCP Streamable HTTP 集成 AnySearch，支持通用搜索、批量搜索（1-5 并行）、URL 内容提取、垂直领域搜索
 - **🔗 多模型通信** — 支持 MCP Sampling（客户端模型）和 Direct HTTP（自有 API）两种 LLM 通信方式，兼容 OpenAI / Anthropic 两种 API 格式
 - **☁️ 可托管部署** — 无本地环境依赖，可一键部署到 ModelScope MCP 广场，自动生成 SSE 访问地址
+- **🔁 自动重试** — 工具调用失败自动重试 3 次，指数退避（1s → 2s → 4s）
 
 ## 🚀 快速上手
 
 ### 方式 1: MCP 客户端配置（推荐）
-
-将以下 JSON 配置添加到您的 MCP 客户端配置文件中：
 
 #### ZCode
 
@@ -59,30 +58,22 @@ Mini Agent MCP 是一个集成了 ReAct 小型 Agent 的 MCP (Model Context Prot
 
 > 在 ZCode 中使用时，Agent 优先使用 MCP Sampling（ZCode 的 LLM）。配置 `LLM_*` 后可作为回退：Sampling 失败时自动切换到 Direct HTTP。
 
-### 方式 2: Direct HTTP（回退）
+### 方式 2: .env 文件（fallback）
 
-当 MCP Sampling 不可用时，配置环境变量让服务器直接调用 LLM API：
+当 MCP 客户端不传递环境变量时，在服务器工作目录创建 `.env` 文件：
 
-```json
-{
-  "mcpServers": {
-    "mini-agent-mcp": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["mini-agent-mcp"],
-      "env": {
-        "ANYSEARCH_API_KEY": "",
-        "LLM_API_FORMAT": "openai",
-        "LLM_API_KEY": "your-key",
-        "LLM_BASE_URL": "https://api.longcat.chat/openai",
-        "LLM_MODEL": "LongCat-2.0-Preview"
-      }
-    }
-  }
-}
+```bash
+# 复制模板
+cp .env.example .env
+
+# 编辑 .env 填入值
+ANYSEARCH_API_KEY=xs_xxxxx
+LLM_API_KEY=lc_xxxxx
+LLM_BASE_URL=https://api.longcat.chat/openai
+LLM_MODEL=LongCat-2.0-Preview
 ```
 
-> `LLM_API_FORMAT` 可选：`openai`（LongCat/SenseNova/OpenAI）或 `anthropic`（LongCat-Anthropic/SenseNova-Anthropic）。不填则自动识别。
+> 服务器启动时自动读取 `.env` 文件，无需客户端传递变量。
 
 ### 方式 3: 本地开发
 
@@ -206,6 +197,10 @@ Agent 支持三种 LLM 通信方式，**按优先级自动选择**：
 | `LLM_MODEL` | 否 | LLM 模型名称 | 无 |
 | `LLM_API_FORMAT` | 否 | `openai` 或 `anthropic` | 自动识别 |
 
+**传递方式**：
+1. MCP 客户端 `env` 字段（标准方式）
+2. `.env` 文件（服务器启动时读取，fallback）
+
 ## 📋 使用示例
 
 ### 内置工具调用示例
@@ -241,12 +236,13 @@ Agent 会调用 `anysearch_batch_search` 同时发起多个查询。
 mini-agent-mcp/
 ├── LICENSE                     # Apache-2.0 许可证
 ├── README.md                   # 项目文档
+├── .env.example                # 环境变量模板
 ├── package.json                # NPM 包配置
 ├── tsconfig.json               # TypeScript 配置
 ├── assets/
 │   └── icon.png                # 项目图标 (512x512)
 ├── src/
-│   ├── index.ts                # MCP 服务器入口
+│   ├── index.ts                # MCP 服务器入口（含 .env 加载 + 重试）
 │   ├── tools/
 │   │   ├── types.ts            # 工具类型定义
 │   │   ├── registry.ts         # 工具注册表
@@ -274,9 +270,11 @@ mini-agent-mcp/
 
 ## ⚠️ 使用限制
 
-- 自由 hosted 服务有调用配额限制（超限返回 HTTP 429）
+- 免费托管服务有调用配额限制（超限返回 HTTP 429）
 - 匿名 AnySearch 访问有速率限制（建议配置 API Key）
 - Agent 单次任务最多 8 个工具调用步骤
+- 工具调用超时 60 秒，LLM 推理超时 120 秒
+- 工具失败后自动重试 3 次（指数退避）
 
 ## 📄 许可证
 
