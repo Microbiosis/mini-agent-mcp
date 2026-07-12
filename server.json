@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.Microbiosis/mini-agent-mcp",
+  "title": "Mini Agent MCP",
+  "description": "MCP server with an integrated ReAct mini-agent that autonomously uses tools. Includes AnySearch integration for web search and multi-model LLM communication via MCP sampling.",
+  "icon": "assets/icon.png",
+  "serverDependencies": {},
+  "tools": [],
+  "resources": [],
+  "prompts": [],
+  "developer": {
+    "name": "Microbiosis",
+    "url": "https://github.com/Microbiosis"
+  },
+  "repository": {
+    "url": "https://github.com/Microbiosis/mini-agent-mcp"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "agent", "react-agent", "llm", "ai-agent", "search", "anysearch"]
+}

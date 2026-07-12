@@ -7,10 +7,12 @@
   "bin": {
     "mini-agent-mcp": "dist/index.js"
   },
+  "mcpName": "io.github.Microbiosis/mini-agent-mcp",
   "files": [
     "dist",
     "assets",
-    "README.md"
+    "README.md",
+    "server.json"
   ],
   "scripts": {
     "build": "tsc",
