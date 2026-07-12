@@ -143,7 +143,7 @@ server.addTool({
     "Otherwise uses a rule-based pattern matching engine for simple tasks.",
   parameters: z.object({
     task: z.string().describe("The task for the agent to complete"),
-    mode: z.string().optional().describe("Force mode: 'rule' for no-LLM mode"),
+    mode: z.enum(["auto", "rule"]).optional().describe("Force mode: 'rule' for no-LLM mode"),
   }),
   execute: async (args) => {
     const result = await runAgent(args.task, args.mode === "rule" ? "rule" : undefined);
