@@ -1,21 +1,43 @@
 /**
  * ReAct Agent — Reasoning + Acting loop.
  *
- * Flow:
- *   1. Agent receives a task
- *   2. Agent thinks about what to do (Thought)
- *   3. Agent chooses a tool and provides input (Action + Action Input)
- *   4. Tool executes, result is observed (Observation)
- *   5. Repeat 2-4 until agent has enough info
- *   6. Agent produces Final Answer
- *
- * If no LLM API key is configured, falls back to a rule-based agent
- * that pattern-matches the task and calls appropriate tools.
+ * Hooks system (Yao pattern):
+ *   - CreateHook: runs before each LLM call, can modify messages
+ *   - NextHook: runs after each LLM call, can validate output
  */
 
 import { allTools, getTool, getToolDescriptions, buildToolList } from "../tools/registry.js";
 import type { ToolDefinition as MCPToolDef, ToolResult } from "../tools/types.js";
 import { callLLM, getLLMConfig, getLLMMode, type LLMMessage, type ToolDefinition as LLMToolDef } from "./llm.js";
+
+// ─── Hooks System ──────────────────────────────────────────────────────────
+export interface HookContext {
+  task: string;
+  step: number;
+  maxSteps: number;
+}
+
+export type CreateHook = (ctx: HookContext, messages: LLMMessage[]) => Promise<LLMMessage[] | null>;
+export type NextHook = (ctx: HookContext, response: { content: string | null; toolCalls?: any[] }) => Promise<"continue" | "stop" | null>;
+
+let createHooks: CreateHook[] = [];
+let nextHooks: NextHook[] = [];
+
+/** Register a CreateHook (runs before each LLM call) */
+export function addCreateHook(hook: CreateHook): void {
+  createHooks.push(hook);
+}
+
+/** Register a NextHook (runs after each LLM call) */
+export function addNextHook(hook: NextHook): void {
+  nextHooks.push(hook);
+}
+
+/** Clear all hooks */
+export function clearHooks(): void {
+  createHooks = [];
+  nextHooks = [];
+}
 
 export interface AgentStep {
   thought: string;
@@ -157,10 +179,37 @@ Rules:
   ];
 
   for (let i = 0; i < MAX_STEPS; i++) {
+    // ── CreateHook: before LLM call ──
+    const ctx: HookContext = { task, step: i, maxSteps: MAX_STEPS };
+    for (const hook of createHooks) {
+      const modified = await hook(ctx, messages);
+      if (modified === null) {
+        throw new Error("LLM call cancelled by CreateHook");
+      }
+      // If hook returned modified messages, use them
+      if (modified) messages.length = 0 && messages.push(...modified);
+    }
+
     const llmResponse = await callLLM(messages, openaiTools, "auto");
 
     if (llmResponse.error) {
       throw new Error(llmResponse.errorMessage || "LLM call failed");
+    }
+
+    // ── NextHook: after LLM call ──
+    for (const hook of nextHooks) {
+      const decision = await hook(ctx, {
+        content: llmResponse.content,
+        toolCalls: llmResponse.toolCalls,
+      });
+      if (decision === "stop") return {
+        success: true,
+        answer: llmResponse.content || "Task stopped by NextHook.",
+        steps,
+        totalSteps: steps.length,
+        llmPowered: true,
+        llmMode: mode,
+      };
     }
 
     // === Handle tool_calls (function calling) ===
