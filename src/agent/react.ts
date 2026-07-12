@@ -134,10 +134,18 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
       throw new Error(llmResponse.errorMessage || "LLM call failed");
     }
 
-    messages.push({ role: "assistant", content: llmResponse.content });
+    // Handle tool calls (function calling) — skip text parsing
+    if (llmResponse.finishReason === "tool_calls" && llmResponse.toolCalls) {
+      // For now, fall back to text-based parsing
+      // TODO: implement native function calling loop
+      throw new Error("LLM returned tool_calls");
+    }
+
+    const text = llmResponse.content || "";
+    messages.push({ role: "assistant", content: text });
 
     // Parse response
-    const step = parseLLMResponse(llmResponse.content);
+    const step = parseLLMResponse(text);
     steps.push(step);
 
     // Check for final answer
@@ -203,12 +211,12 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
     };
   }
 
-  const finalStep = parseLLMResponse(finalResponse.content);
+  const finalStep = parseLLMResponse(finalResponse.content || "");
   steps.push(finalStep);
 
   return {
     success: true,
-    answer: finalStep.finalAnswer || finalResponse.content,
+    answer: finalStep.finalAnswer || finalResponse.content || "",
     steps,
     totalSteps: steps.length,
     llmPowered: true,

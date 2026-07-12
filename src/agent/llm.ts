@@ -20,8 +20,28 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface LLMMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_call_id?: string;
+  tool_calls?: ToolCall[];
+}
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
 }
 
 export interface LLMConfig {
@@ -31,13 +51,14 @@ export interface LLMConfig {
 }
 
 export interface LLMResponse {
-  content: string;
+  content: string | null;
   finishReason: "stop" | "length" | "tool_calls" | "error" | "unknown";
   error: boolean;
   errorMessage?: string;
   errorStatusCode?: number;
   errorShouldRetry?: boolean;
   retryAfter?: number;
+  toolCalls?: ToolCall[];
   usage?: {
     promptTokens?: number;
     completionTokens?: number;
@@ -116,14 +137,18 @@ export function isLMAvailable(): boolean {
 
 // ─── Main entry point ────────────────────────────────────────────────────────
 
-export async function callLLM(messages: LLMMessage[]): Promise<LLMResponse> {
+export async function callLLM(
+  messages: LLMMessage[],
+  tools?: ToolDefinition[],
+  toolChoice?: "auto" | "none" | { type: "function"; function: { name: string } }
+): Promise<LLMResponse> {
   if (isSamplingAvailable()) {
     return await callViaSampling(messages);
   }
 
   const client = getOpenAIClient();
   if (client) {
-    return await callViaOpenAI(client, messages);
+    return await callViaOpenAI(client, messages, tools, toolChoice);
   }
 
   return {
@@ -172,34 +197,53 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
 
 // ─── OpenAI SDK ────────────────────────────────────────────────────────────
 
-async function callViaOpenAI(client: OpenAI, messages: LLMMessage[]): Promise<LLMResponse> {
+async function callViaOpenAI(
+  client: OpenAI,
+  messages: LLMMessage[],
+  tools?: ToolDefinition[],
+  toolChoice?: "auto" | "none" | { type: "function"; function: { name: string } }
+): Promise<LLMResponse> {
   const cfg = getLLMConfig();
   if (!cfg) {
-    return {
-      content: "", finishReason: "error", error: true,
-      errorMessage: "LLM config not available",
-    };
+    return { content: "", finishReason: "error", error: true, errorMessage: "LLM config not available" };
   }
 
   try {
-    const response = await client.chat.completions.create(
-      {
-        model: cfg.model,
-        messages,
-        temperature: 0.3,
-        max_tokens: 1024,
-      },
-      { timeout: 60_000 }
-    );
+    const body: Record<string, unknown> = {
+      model: cfg.model,
+      messages,
+      temperature: 0.3,
+      max_tokens: 1024,
+    };
+    if (tools) body.tools = tools;
+    if (toolChoice) body.tool_choice = toolChoice;
+
+    const response = await client.chat.completions.create(body as any, { timeout: 60_000 });
 
     const choice = response.choices?.[0];
-    const content = choice?.message?.content;
+    const content = choice?.message?.content ?? null;
     const finishReason = choice?.finish_reason ?? "unknown";
+    const toolCalls = choice?.message?.tool_calls;
 
-    if (!content) {
+    // Handle tool calls result
+    if (finishReason === "tool_calls" && toolCalls) {
       return {
-        content: "", finishReason: "error", error: true,
-        errorMessage: "OpenAI SDK returned empty content",
+        content: null,
+        finishReason: "tool_calls",
+        error: false,
+        toolCalls: (toolCalls as Array<{ id: string; type: string; function: { name: string; arguments: string } }>).map((tc) => ({
+          id: tc.id,
+          type: "function" as const,
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          },
+        })),
+        usage: response.usage ? {
+          promptTokens: response.usage.prompt_tokens,
+          completionTokens: response.usage.completion_tokens,
+          totalTokens: response.usage.total_tokens,
+        } : undefined,
       };
     }
 
@@ -208,17 +252,13 @@ async function callViaOpenAI(client: OpenAI, messages: LLMMessage[]): Promise<LL
       finishReason: finishReason as LLMResponse["finishReason"],
       error: false,
       usage: response.usage
-        ? {
-            promptTokens: response.usage.prompt_tokens,
-            completionTokens: response.usage.completion_tokens,
-            totalTokens: response.usage.total_tokens,
-          }
+        ? { promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens }
         : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const statusCode = err instanceof OpenAI.APIError ? err.status : undefined;
-
+    console.error(`[OpenAI SDK] Error: ${msg}`);
     return {
       content: "", finishReason: "error", error: true,
       errorMessage: `OpenAI SDK error: ${msg}`,
