@@ -118,6 +118,7 @@ node dist/index.js --test    # 运行测试
 | `LLM_API_KEY` | 否 | LLM API 密钥（裸 Key，不带 `Bearer `） | 无 |
 | `LLM_BASE_URL` | 否 | LLM 端点（需包含 `/v1`） | 无 |
 | `LLM_MODEL` | 否 | 模型名称 | 无 |
+| `LLM_MAX_TOKENS` | 否 | 最大生成 token 数 | `4096` |
 
 ## 🌐 支持的 LLM 供应商
 
