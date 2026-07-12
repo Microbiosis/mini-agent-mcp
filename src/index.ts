@@ -57,17 +57,59 @@ const server = new FastMCP({
   version: version as `${number}.${number}.${number}`,
 });
 
+// ─── Guardrails: Pre-execution validation for all tool calls ──────────────
+type Guardrail = {
+  name: string;
+  validate: (toolName: string, args: Record<string, unknown>) => string | null; // null = pass, string = error
+};
+
+const guardrails: Guardrail[] = [
+  {
+    name: "input-length",
+    validate: (toolName, args) => {
+      for (const [key, val] of Object.entries(args)) {
+        if (typeof val === "string" && val.length > 10000) {
+          return `Parameter '${key}' exceeds 10,000 characters`;
+        }
+      }
+      return null;
+    },
+  },
+  {
+    name: "calculator-expression",
+    validate: (toolName, args) => {
+      if (toolName === "calculator" && typeof args.expression === "string") {
+        if (args.expression.length > 500) return "Expression too long (max 500 chars)";
+      }
+      return null;
+    },
+  },
+];
+
+function runGuardrails(toolName: string, args: Record<string, unknown>): string | null {
+  for (const g of guardrails) {
+    const result = g.validate(toolName, args);
+    if (result) return `[Guardrail: ${g.name}] ${result}`;
+  }
+  return null;
+}
+
 // ─── Register Built-in Tools ─────────────────────────────────────────────
 const toolSchemas = {
   calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen,
 };
 
 for (const [, def] of Object.entries(toolSchemas)) {
+  const originalExecute = def.handler;
   server.addTool({
     name: def.name,
     description: def.description,
     parameters: def.inputSchema,
-    execute: def.handler,
+    execute: async (args) => {
+      const guardrailError = runGuardrails(def.name, args as Record<string, unknown>);
+      if (guardrailError) return guardrailError;
+      return await originalExecute(args);
+    },
   });
 }
 
