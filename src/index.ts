@@ -146,7 +146,7 @@ server.addTool({
     mode: z.string().optional().describe("Force mode: 'rule' for no-LLM mode"),
   }),
   execute: async (args) => {
-    const result = await runAgent(args.task);
+    const result = await runAgent(args.task, args.mode === "rule" ? "rule" : undefined);
     const lines: string[] = [];
     lines.push(`Task: ${args.task}`);
     lines.push(`Mode: ${result.llmPowered ? (result.llmMode === "sampling" ? "LLM (sampling)" : "LLM (HTTP)") : "Rule-based"}`);
