@@ -193,10 +193,9 @@ Agent 支持三种 LLM 通信方式，**按优先级自动选择**：
 | 变量 | 必需 | 说明 | 默认值 |
 |------|------|------|--------|
 | `ANYSEARCH_API_KEY` | 否 | AnySearch API Key | 匿名访问（更低限额） |
-| `LLM_API_KEY` | 否 | LLM API 密钥 | 无（回退到 Sampling） |
-| `LLM_BASE_URL` | 否 | LLM 端点 URL | 无 |
-| `LLM_MODEL` | 否 | LLM 模型名称 | 无 |
-| `LLM_API_FORMAT` | 否 | `openai` 或 `anthropic` | 自动识别 |
+| `LLM_API_KEY` | 否 | LLM API 密钥（裸 Key，不带 `Bearer `） | 无（回退到 Sampling） |
+| `LLM_BASE_URL` | 否 | LLM 端点（需包含 `/v1`） | 无 |
+| `LLM_MODEL` | 否 | 模型名称 | 无 |
 
 **传递方式**：
 1. MCP 客户端 `env` 字段（标准方式）
