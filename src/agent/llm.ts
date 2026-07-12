@@ -2,8 +2,8 @@
  * LLM Communication Layer — powered by OpenAI SDK
  *
  * Uses the official OpenAI SDK for all LLM calls. This handles:
+ *   - Authentication (Bearer <REDACTED>)
  *   - API format normalization
- *   - Authentication (Bearer / x-api-key)
  *   - Retry logic with exponential backoff
  *   - Timeout handling
  *   - Token usage tracking
@@ -29,9 +29,6 @@ export interface LLMConfig {
   baseUrl: string;
   model: string;
 }
-
-/** API format selection (matches ZCode supplier config) */
-export type ApiFormat = "openai" | "anthropic";
 
 export interface LLMResponse {
   content: string;
@@ -80,35 +77,17 @@ function getOpenAIClient(): OpenAI | null {
   const cfg = getLLMConfig();
   if (!cfg) return null;
 
-  // Reuse existing client if config matches
   if (openaiClient) return openaiClient;
 
-  const resolvedBaseUrl = cfg.baseUrl.replace(/\/+$/, "");
-
-  // Determine auth: LongCat Anthropic uses x-api-key, others use Bearer
-  const isAnthropicViaLongCat = cfg.baseUrl.includes("/anthropic") || process.env.LLM_API_FORMAT === "anthropic";
-
-  if (isAnthropicViaLongCat) {
-    // For Anthropic-compatible endpoints, build a custom client with x-api-key
-    openaiClient = new OpenAI({
-      apiKey: cfg.apiKey,
-      baseURL: `${resolvedBaseUrl.replace(/\/anthropic$/, "")}/anthropic/v1`,
-      defaultHeaders: { "anthropic-version": "2023-06-01", "x-api-key": cfg.apiKey },
-    });
-  } else {
-    // Standard OpenAI-compatible endpoint
-    openaiClient = new OpenAI({
-      apiKey: cfg.apiKey,
-      baseURL: resolvedBaseUrl,
-    });
-  }
+  openaiClient = new OpenAI({
+    apiKey: cfg.apiKey,
+    baseURL: cfg.baseUrl.replace(/\/+$/, ""),
+  });
 
   return openaiClient;
 }
 
-/**
- * Reset the OpenAI client (needed when env vars change).
- */
+/** Reset the OpenAI client (needed when env vars change). */
 export function resetOpenAIClient(): void {
   openaiClient = null;
 }
@@ -194,10 +173,18 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
 // ─── OpenAI SDK ────────────────────────────────────────────────────────────
 
 async function callViaOpenAI(client: OpenAI, messages: LLMMessage[]): Promise<LLMResponse> {
+  const cfg = getLLMConfig();
+  if (!cfg) {
+    return {
+      content: "", finishReason: "error", error: true,
+      errorMessage: "LLM config not available",
+    };
+  }
+
   try {
     const response = await client.chat.completions.create(
       {
-        model: process.env.LLM_MODEL || "gpt-4o-mini",
+        model: cfg.model,
         messages,
         temperature: 0.3,
         max_tokens: 1024,
