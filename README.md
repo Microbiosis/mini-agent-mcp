@@ -142,9 +142,9 @@ Agent 支持三种 LLM 通信方式，**按优先级自动选择**：
 
 | 变量 | 必需 | 说明 | 示例 |
 |------|------|------|------|
-| `LLM_API_KEY` | 是 | API 密钥 | `lc_xxxxx` |
-| `LLM_BASE_URL` | 是 | API 端点 | `https://api.longcat.chat/openai` |
-| `LLM_MODEL` | 是 | 模型名称 | `LongCat-2.0-Preview` |
+| `LLM_API_KEY` | 是 | API 密钥 | `sk-xxxxx` |
+| `LLM_BASE_URL` | 是 | API 端点（需包含 `/v1`） | `https://api.longcat.chat/openai/v1` |
+| `LLM_MODEL` | 是 | 模型名称 | `LongCat-2.0` |
 | `LLM_API_FORMAT` | 否 | `openai` 或 `anthropic`（不填则自动识别） | `openai` |
 
 ### 方式 3: 规则引擎（兜底）
@@ -167,7 +167,7 @@ Agent 支持三种 LLM 通信方式，**按优先级自动选择**：
 
 | 供应商 | `LLM_BASE_URL` | `LLM_MODEL` 示例 |
 |--------|----------------|------------------|
-| **LongCat** | `https://api.longcat.chat/openai` | `LongCat-2.0-Preview` |
+| **LongCat** | `https://api.longcat.chat/openai/v1` | `LongCat-2.0` |
 | **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` |
 | **DeepSeek** | `https://api.deepseek.com/v1` | `deepseek-chat` |
 | **SenseNova** | `https://token.sensenova.cn/v1` | `sensenova-6.7-flash-lite` |
