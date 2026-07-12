@@ -148,8 +148,7 @@ Final Answer: <your complete answer to the task>
 
 Rules:
 - Use exactly one tool at a time.
-- If a task doesn't need any tool, directly give the Final Answer.
-- Be concise.
+- If a task doesn't need any tool, directly give the Final Answer with complete content.
 - Maximum ${MAX_STEPS} tool calls allowed.`;
 
   const messages: LLMMessage[] = [
@@ -210,14 +209,13 @@ Rules:
     const text = llmResponse.content || "";
     messages.push({ role: "assistant", content: text });
 
-    // Check for Final Answer
+    // Check for Final Answer — return full content, not just parsed text
     const finalMatch = text.match(/Final Answer:\s*(.*?)$/s);
     if (finalMatch) {
-      const finalAnswer = finalMatch[1].trim();
-      steps.push({ thought: "Task completed.", finalAnswer });
+      steps.push({ thought: "Task completed.", finalAnswer: text });
       return {
         success: true,
-        answer: finalAnswer,
+        answer: text,  // Full LLM response, not just the captured group
         steps,
         totalSteps: steps.length,
         llmPowered: true,
