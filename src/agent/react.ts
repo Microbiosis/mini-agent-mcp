@@ -14,8 +14,8 @@
  */
 
 import { allTools, getTool, getToolDescriptions, buildToolList } from "../tools/registry.js";
-import type { ToolResult } from "../tools/types.js";
-import { callLLM, getLLMConfig, getLLMMode, type LLMMessage } from "./llm.js";
+import type { ToolDefinition as MCPToolDef, ToolResult } from "../tools/types.js";
+import { callLLM, getLLMConfig, getLLMMode, type LLMMessage, type ToolDefinition as LLMToolDef } from "./llm.js";
 
 export interface AgentStep {
   thought: string;
@@ -106,7 +106,27 @@ function parseLLMResponse(response: string): AgentStep {
 }
 
 /**
- * Run the ReAct loop with an LLM.
+ * Convert MCP tool definitions to OpenAI function calling format.
+ */
+function toOpenAITools(tools: MCPToolDef[]): LLMToolDef[] {
+  return tools.map((t) => ({
+    type: "function" as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema as unknown as Record<string, unknown>,
+    },
+  }));
+}
+
+/**
+ * Run the ReAct loop with an LLM, using native function calling when available.
+ *
+ * Flow:
+ *   1. Call LLM with messages + tool definitions
+ *   2a. LLM returns tool_calls → execute tool → add result as tool role → repeat
+ *   2b. LLM returns text → parse for Final Answer, or continue loop
+ *   3. Max 8 steps, then force final answer
  */
 async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<AgentResult> {
   const steps: AgentStep[] = [];
@@ -114,11 +134,23 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
   // Discover all tools including AnySearch for the LLM
   const availableTools = await buildToolList();
   const availableToolMap = new Map(availableTools.map((t) => [t.name, t]));
+  const openaiTools = toOpenAITools(availableTools);
+  const toolNames = openaiTools.map((t) => t.function.name).join(", ");
 
-  const systemPrompt = SYSTEM_PROMPT.replace(
-    "{TOOL_DESCRIPTIONS}",
-    getToolDescriptions(availableTools)
-  );
+  const systemPrompt = `You are a helpful agent that solves tasks by using tools.
+You have access to these tools: ${toolNames}.
+
+Use function calling to invoke tools. The tool result will be returned to you automatically.
+
+When you have enough information to answer the original task, respond with:
+
+Final Answer: <your complete answer to the task>
+
+Rules:
+- Use exactly one tool at a time.
+- If a task doesn't need any tool, directly give the Final Answer.
+- Be concise.
+- Maximum ${MAX_STEPS} tool calls allowed.`;
 
   const messages: LLMMessage[] = [
     { role: "system", content: systemPrompt },
@@ -126,33 +158,66 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
   ];
 
   for (let i = 0; i < MAX_STEPS; i++) {
-    // Call LLM (via MCP sampling or direct HTTP)
-    const llmResponse = await callLLM(messages);
+    const llmResponse = await callLLM(messages, openaiTools, "auto");
 
-    // If LLM failed, abort the loop
     if (llmResponse.error) {
       throw new Error(llmResponse.errorMessage || "LLM call failed");
     }
 
-    // Handle tool calls (function calling) — skip text parsing
+    // === Handle tool_calls (function calling) ===
     if (llmResponse.finishReason === "tool_calls" && llmResponse.toolCalls) {
-      // For now, fall back to text-based parsing
-      // TODO: implement native function calling loop
-      throw new Error("LLM returned tool_calls");
+      for (const tc of llmResponse.toolCalls) {
+        const step: AgentStep = {
+          thought: `Calling tool: ${tc.function.name}`,
+          action: tc.function.name,
+        };
+
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.function.arguments || "{}");
+        } catch {
+          args = {};
+        }
+        step.actionInput = args;
+
+        // Execute the tool
+        const tool = availableToolMap.get(tc.function.name) || getTool(tc.function.name);
+        if (tool) {
+          try {
+            const result: ToolResult = await tool.handler(args);
+            const obsText = result.content
+              .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
+              .join("\n");
+            step.observation = obsText;
+            messages.push({ role: "tool", tool_call_id: tc.id, content: obsText });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            step.observation = `Error: ${msg}`;
+            messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${msg}` });
+          }
+        } else {
+          const err = `Tool '${tc.function.name}' not found`;
+          step.observation = err;
+          messages.push({ role: "tool", tool_call_id: tc.id, content: err });
+        }
+
+        steps.push(step);
+      }
+      continue; // Go back to LLM with tool results
     }
 
+    // === Handle text response ===
     const text = llmResponse.content || "";
     messages.push({ role: "assistant", content: text });
 
-    // Parse response
-    const step = parseLLMResponse(text);
-    steps.push(step);
-
-    // Check for final answer
-    if (step.finalAnswer) {
+    // Check for Final Answer
+    const finalMatch = text.match(/Final Answer:\s*(.*?)$/s);
+    if (finalMatch) {
+      const finalAnswer = finalMatch[1].trim();
+      steps.push({ thought: "Task completed.", finalAnswer });
       return {
         success: true,
-        answer: step.finalAnswer,
+        answer: finalAnswer,
         steps,
         totalSteps: steps.length,
         llmPowered: true,
@@ -160,50 +225,26 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
       };
     }
 
-    // If no action, ask LLM to give final answer
-    if (!step.action) {
+    // If no final answer, ask for it
+    if (i < MAX_STEPS - 1) {
       messages.push({
         role: "user",
-        content: "Please provide your Final Answer now.",
+        content: "Please provide your Final Answer now based on what you know.",
       });
-      continue;
-    }
-
-    // Execute the tool (check both local registry and dynamic tool map)
-    const tool = availableToolMap.get(step.action) || getTool(step.action);
-    if (!tool) {
-      const obs = `Error: tool '${step.action}' not found. Available tools: ${availableTools.map((t) => t.name).join(", ")}`;
-      step.observation = obs;
-      messages.push({ role: "user", content: `Observation: ${obs}` });
-      continue;
-    }
-
-    try {
-      const result: ToolResult = await tool.handler(step.actionInput || {});
-      const obsText = result.content
-        .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-        .join("\n");
-      step.observation = obsText;
-      messages.push({ role: "user", content: `Observation: ${obsText}` });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      step.observation = `Error executing tool: ${msg}`;
-      messages.push({ role: "user", content: `Observation: ${step.observation}` });
     }
   }
 
-  // Max steps reached — ask LLM for final summary
+  // Max steps — force final summary
   messages.push({
     role: "user",
-    content: "Maximum steps reached. Please provide your Final Answer based on what you know so far.",
+    content: "Maximum steps reached. Please provide your Final Answer now.",
   });
-  const finalResponse = await callLLM(messages);
+  const finalResponse = await callLLM(messages, openaiTools);
 
   if (finalResponse.error) {
-    // Even on error, return what we have
     return {
       success: true,
-      answer: steps[steps.length - 1]?.finalAnswer || "Max steps reached with LLM error.",
+      answer: "Max steps reached.",
       steps,
       totalSteps: steps.length,
       llmPowered: true,
@@ -211,12 +252,9 @@ async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<Age
     };
   }
 
-  const finalStep = parseLLMResponse(finalResponse.content || "");
-  steps.push(finalStep);
-
   return {
     success: true,
-    answer: finalStep.finalAnswer || finalResponse.content || "",
+    answer: finalResponse.content || "Task completed.",
     steps,
     totalSteps: steps.length,
     llmPowered: true,
