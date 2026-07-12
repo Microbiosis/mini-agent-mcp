@@ -496,10 +496,10 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
  * Main entry point — runs the agent on a task.
  * Priority: MCP sampling (client model) > Direct HTTP > Rule-based
  */
-export async function runAgent(task: string, mode?: "rule"): Promise<AgentResult> {
-  const llmMode = mode === "rule" ? "none" : getLLMMode();
+export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentResult> {
+  const mode = forceMode === "rule" ? "none" : getLLMMode();
 
-  if (llmMode === "sampling") {
+  if (mode === "sampling") {
     // 1) Try MCP sampling first
     try {
       return await runLLMAgent(task, "sampling");
@@ -526,7 +526,7 @@ export async function runAgent(task: string, mode?: "rule"): Promise<AgentResult
     }
   }
 
-  if (llmMode === "http") {
+  if (mode === "http") {
     // Direct HTTP only (no sampling available)
     try {
       return await runLLMAgent(task, "http");
