@@ -96,6 +96,16 @@ export function getLLMConfig(): LLMConfig | null {
   return { apiKey, baseUrl, model };
 }
 
+/** Get max tokens from env var, default 4096 */
+export function getMaxTokens(): number {
+  const val = process.env.LLM_MAX_TOKENS;
+  if (val) {
+    const n = parseInt(val, 10);
+    if (!isNaN(n) && n > 0) return n;
+  }
+  return 4096;
+}
+
 /**
  * Get or create the OpenAI SDK client.
  * Re-uses the same client instance if config hasn't changed.
@@ -181,8 +191,9 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
         },
       }));
 
+    const maxTokens = getMaxTokens();
     const result = await mcpServer!.createMessage(
-      { messages: chatMessages, systemPrompt, maxTokens: 1024 },
+      { messages: chatMessages, systemPrompt, maxTokens },
       { timeout: 120_000 }
     );
 
@@ -219,11 +230,12 @@ async function callViaOpenAI(
   }
 
   try {
+    const maxTokens = getMaxTokens();
     const body: Record<string, unknown> = {
       model: cfg.model,
       messages,
       temperature: 0.3,
-      max_tokens: 1024,
+      max_tokens: maxTokens,
     };
     if (tools) body.tools = tools;
     if (toolChoice) body.tool_choice = toolChoice;
