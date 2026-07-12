@@ -19,9 +19,15 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface LLMMessageContent {
+  type: string;
+  text?: string;
+  image_url?: { url: string; detail?: string };
+}
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | LLMMessageContent[];
   tool_call_id?: string;
   tool_calls?: ToolCall[];
 }
@@ -164,15 +170,19 @@ export async function callLLM(
 async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
   try {
     const systemContent = messages.find((m) => m.role === "system")?.content;
+    const systemPrompt = typeof systemContent === "string" ? systemContent : undefined;
     const chatMessages = messages
       .filter((m) => m.role !== "system")
       .map((m) => ({
         role: m.role as "user" | "assistant",
-        content: { type: "text" as const, text: m.content },
+        content: {
+          type: "text" as const,
+          text: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+        },
       }));
 
     const result = await mcpServer!.createMessage(
-      { messages: chatMessages, systemPrompt: systemContent, maxTokens: 1024 },
+      { messages: chatMessages, systemPrompt, maxTokens: 1024 },
       { timeout: 120_000 }
     );
 
