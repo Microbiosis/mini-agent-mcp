@@ -11,6 +11,9 @@ import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getAnySearchTools } from "./tools/anysearch.js";
+import { calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen } from "./tools/index.js";
+import { runAgent } from "./agent/react.js";
 
 // ─── Load .env file (fallback for clients that don't pass env vars) ─────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -55,8 +58,6 @@ const server = new FastMCP({
 });
 
 // ─── Register Built-in Tools ─────────────────────────────────────────────
-import { calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen } from "./tools/index.js";
-
 const toolSchemas = {
   calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen,
 };
@@ -70,8 +71,25 @@ for (const [, def] of Object.entries(toolSchemas)) {
   });
 }
 
+// ─── Register AnySearch Tools (dynamic discovery) ────────────────────────
+(async () => {
+  try {
+    const anyTools = await getAnySearchTools();
+    for (const t of anyTools) {
+      server.addTool({
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema as any,
+        execute: t.handler as any,
+      });
+    }
+    console.error(`[AnySearch] ${anyTools.length} tools registered`);
+  } catch {
+    console.error("[AnySearch] Not available (search tools disabled)");
+  }
+})();
+
 // ─── Register run_agent Tool ─────────────────────────────────────────────
-import { runAgent } from "./agent/react.js";
 
 server.addTool({
   name: "run_agent",
