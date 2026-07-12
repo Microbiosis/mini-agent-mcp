@@ -47,6 +47,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "fastmcp": "^4.4.0",
     "openai": "^6.46.0"
   },
   "devDependencies": {
