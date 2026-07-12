@@ -41,7 +41,8 @@
         "ANYSEARCH_API_KEY": "",
         "LLM_API_KEY": "",
         "LLM_BASE_URL": "",
-        "LLM_MODEL": ""
+        "LLM_MODEL": "",
+        "LLM_MAX_TOKENS": "4096"
       }
     }
   }
