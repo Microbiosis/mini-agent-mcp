@@ -57,7 +57,19 @@ export interface AgentResult {
   llmMode?: "sampling" | "http";
 }
 
-const MAX_STEPS = 8;
+/** Max steps per agent run (env AGENT_MAX_TURNS, default 8) */
+const MAX_STEPS = (() => {
+  const val = process.env.AGENT_MAX_TURNS;
+  if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n > 0 && n <= 50) return n; }
+  return 8;
+})();
+
+/** Max tool retries on failure (env AGENT_TOOL_RETRY, default 1) */
+const TOOL_RETRY = (() => {
+  const val = process.env.AGENT_TOOL_RETRY;
+  if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n >= 0 && n <= 3) return n; }
+  return 1;
+})();
 
 const SYSTEM_PROMPT = `You are a helpful agent that solves tasks by using tools.
 You have access to the following tools:
@@ -228,20 +240,30 @@ Rules:
         }
         step.actionInput = args;
 
-        // Execute the tool
+        // Execute the tool with retry
         const tool = availableToolMap.get(tc.function.name) || getTool(tc.function.name);
         if (tool) {
-          try {
-            const result: ToolResult = await tool.handler(args);
-            const obsText = result.content
-              .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-              .join("\n");
-            step.observation = obsText;
-            messages.push({ role: "tool", tool_call_id: tc.id, content: obsText });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            step.observation = `Error: ${msg}`;
-            messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${msg}` });
+          let lastError: string | null = null;
+          for (let attempt = 1; attempt <= TOOL_RETRY + 1; attempt++) {
+            try {
+              const result: ToolResult = await tool.handler(args);
+              const obsText = result.content
+                .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
+                .join("\n");
+              step.observation = obsText;
+              messages.push({ role: "tool", tool_call_id: tc.id, content: obsText });
+              lastError = null;
+              break;
+            } catch (err) {
+              lastError = err instanceof Error ? err.message : String(err);
+              if (attempt <= TOOL_RETRY) {
+                await new Promise((r) => setTimeout(r, 1000 * attempt));
+              }
+            }
+          }
+          if (lastError) {
+            step.observation = `Error: ${lastError}`;
+            messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${lastError}` });
           }
         } else {
           const err = `Tool '${tc.function.name}' not found`;

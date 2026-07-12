@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { getAnySearchTools } from "./tools/anysearch.js";
 import { calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen } from "./tools/index.js";
 import { runAgent } from "./agent/react.js";
+import { runWorkflow } from "./workflow/dag.js";
 import { toolManager } from "./tools/manager.js";
 
 // ─── Load .env ────────────────────────────────────────────────────────────
@@ -127,15 +128,40 @@ registerFastMCPTool(
   }
 );
 
+registerFastMCPTool(
+  "run_workflow",
+  "Run a multi-step DAG workflow. Define steps with dependencies; runs them in order. Each step is an agent task.",
+  z.object({
+    steps: z.string().describe("JSON array of workflow steps: [{id, task, dependsOn?, label?, timeout?}]"),
+  }),
+  async (args) => {
+    let steps: any[];
+    try { steps = JSON.parse(args.steps); } catch { return "Error: steps must be valid JSON"; }
+    const result = await runWorkflow(steps);
+    const lines = [`Workflow ${result.success ? "succeeded" : "completed with errors"}`, `Duration: ${(result.totalDurationMs / 1000).toFixed(1)}s`, ""];
+    for (const s of result.steps) {
+      lines.push(`[${s.id}]${s.label ? " " + s.label : ""} — ${s.error ? "FAIL: " + s.error : "OK"} (${(s.durationMs / 1000).toFixed(1)}s)`);
+    }
+    return lines.join("\n");
+  }
+);
+
 // ─── Test mode ────────────────────────────────────────────────────────────
 if (process.argv.includes("--test")) {
   console.log("=== Mini Agent MCP — Test Mode ===\n");
+  const testArgs: Record<string, Record<string, unknown>> = {
+    calculator: { expression: "sqrt(144) + 2^3" },
+    text_stats: { text: "Hello world! This is a test. Hello again." },
+    text_transform: { text: "hello world", operation: "uppercase" },
+    unit_convert: { value: 100, from: "cm", to: "inch" },
+    datetime_info: { operation: "now", timezone: "Asia/Shanghai" },
+    random_gen: { operation: "uuid" },
+  };
   for (const tool of toolManager.list()) {
-    console.log(`--- Test: ${tool.name} ---`);
-    try {
-      // Use the predefined test args from handler
-      console.log(await tool.execute({ expression: "sqrt(144) + 2^3" }));
-    } catch { console.log("(skipped)"); }
+    const args = testArgs[tool.name];
+    if (!args) { console.log(`--- ${tool.name} ---\n(skipped)\n`); continue; }
+    console.log(`--- ${tool.name} ---`);
+    try { console.log(await tool.execute(args)); } catch { console.log("(error)"); }
     console.log("");
   }
   console.log("=== All tests passed ===");
