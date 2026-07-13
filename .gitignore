@@ -39,3 +39,6 @@ Thumbs.db
 
 # ZCode IDE
 .zcode/
+
+# IDE / tool generated file lists
+tracked_files.txt
