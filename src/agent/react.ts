@@ -208,7 +208,10 @@ Rules:
         throw new Error("LLM call cancelled by CreateHook");
       }
       // If hook returned modified messages, use them
-      if (modified) messages.length = 0 && messages.push(...modified);
+      if (modified) {
+        messages.length = 0;
+        messages.push(...modified);
+      }
     }
 
     const llmResponse = await callLLM(messages, openaiTools, "auto");
