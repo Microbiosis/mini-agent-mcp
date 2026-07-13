@@ -62,7 +62,7 @@ export interface AgentResult {
 const MAX_STEPS = (() => {
   const val = process.env.AGENT_MAX_TURNS;
   if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n > 0 && n <= 50) return n; }
-  return 8;
+  return 5;
 })();
 
 /** Max tool retries on failure (env AGENT_TOOL_RETRY, default 1) */
@@ -352,18 +352,35 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
   const lowerTask = task.toLowerCase();
   const observations: string[] = [];
 
-  // Split compound tasks on " and then " or " then " or " and " (only for rule-based)
+  // Split compound tasks on " and then " or " then " (only for rule-based)
+  // Note: intentionally NOT splitting on bare "and" to avoid breaking math like "5 and 3"
   const subTasks = task
-    .split(/\s+and\s+then\s+|\s+then\s+|\s+and\s+/i)
+    .split(/\s+and\s+then\s+|\s+then\s+/i)
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
   // Pattern 1: Math expression
-  // Match expressions containing digits and math operators/functions only
+  // Match expressions containing digits and math operators/functions only.
+  // Known math function names (used for precise expression extraction below).
+  const MATH_FN = '(?:sqrt|sin|cos|tan|asin|acos|atan|log|ln|abs|exp|floor|ceil|round|pi|e)';
+
+  /**
+   * Strip trailing non-math content from an extracted expression.
+   * Removes English words that are not valid math tokens, so "2^10 with help"
+   * becomes "2^10". Also strips natural-language suffixes like "and convert to...".
+   */
+  function cleanMathExpr(raw: string): string {
+    const m = raw.match(new RegExp(
+      `^(?:${MATH_FN}\\s*)?[\\d\\s+\\-*/().^]+(?:\\s*(?:${MATH_FN})\\s*[\\d\\s+\\-*/().^]*)*`,
+      'i'
+    ));
+    return m ? m[0].trim() : raw.trim();
+  }
+
   const mathExprRegex =
     /(?:calculate|compute|evaluate|solve)\s+([\d\s+\-*/().^a-z_]+)/i;
   const mathOperatorRegex =
-    /([\d]+\s*[+\-*/^]+\s*[\d\s+\-*/().^a-z_]+)/;
+    /(\(?\s*[\d]+\s*[+\-*/^]+\s*[\d\s+\-*/().^a-z_]+)/;
 
   for (const subTask of subTasks) {
     let expr: string | null = null;
@@ -371,15 +388,14 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     // Try "calculate X" pattern
     const calcMatch = subTask.match(mathExprRegex);
     if (calcMatch && calcMatch[1]) {
-      // Trim at first non-math word (like "and", "to", "into")
-      expr = calcMatch[1].replace(/\s+(?:and|to|into|then)\s.*$/i, "").trim();
+      expr = cleanMathExpr(calcMatch[1]);
     }
 
     // Try bare math expression pattern
     if (!expr) {
       const opMatch = subTask.match(mathOperatorRegex);
       if (opMatch && opMatch[1]) {
-        expr = opMatch[1].replace(/\s+(?:and|to|into|then)\s.*$/i, "").trim();
+        expr = cleanMathExpr(opMatch[1]);
       }
     }
 
@@ -387,7 +403,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     if (!expr) {
       const whatMatch = subTask.match(/what\s+is\s+([\d\s+\-*/().^a-z_]+)/i);
       if (whatMatch && whatMatch[1]) {
-        expr = whatMatch[1].replace(/\s+(?:and|to|into|then)\s.*$/i, "").trim();
+        expr = cleanMathExpr(whatMatch[1]);
       }
     }
 
