@@ -36,9 +36,47 @@ export interface WorkflowResult {
 }
 
 /**
+ * Inject the results of a step's dependencies into the task string.
+ *
+ * This is what makes "results propagate between steps" actually true.
+ * When a step depends on prior steps, their `result.answer` strings are
+ * gathered here and appended to the original task so the downstream
+ * runAgent call has the context it needs.
+ *
+ * Exported so tests can verify behavior without invoking runAgent.
+ */
+export function buildStepTask(step: WorkflowStep, completed: Map<string, string>): string {
+  const deps = step.dependsOn || [];
+  if (deps.length === 0) {
+    return step.task;
+  }
+
+  const blocks: string[] = [];
+  for (const depId of deps) {
+    const ans = completed.get(depId);
+    if (ans !== undefined) {
+      blocks.push(`[${depId}]\n${ans}`);
+    }
+  }
+
+  if (blocks.length === 0) return step.task;
+
+  return [
+    step.task,
+    "",
+    "---",
+    "Results from previous steps:",
+    ...blocks,
+  ].join("\n");
+}
+
+/**
  * Run a DAG workflow.
  * Steps with no dependencies start immediately.
  * Steps with dependencies wait for their prerequisites to complete.
+ *
+ * For dependent steps, the results of prerequisite steps are automatically
+ * appended to the step's task before it is executed. See `buildStepTask`.
  */
 export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult> {
   const start = Date.now();
@@ -90,8 +128,10 @@ export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult
       const stepStart = Date.now();
       try {
         const timeoutMs = (step.timeout || 60) * 1000;
+        // Inject predecessor results so dependencies see their context.
+        const effectiveTask = buildStepTask(step, completed);
         const result = await Promise.race([
-          runAgent(step.task),
+          runAgent(effectiveTask),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error(`Workflow step '${step.id}' timed out after ${timeoutMs}ms`)), timeoutMs)
           ),
