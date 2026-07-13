@@ -78,16 +78,9 @@ function registerFastMCPTool(name: string, description: string, params: z.ZodObj
   });
 }
 
-// Built-in tools
+// Built-in tools (30s timeout — these are synchronous, deterministic, and fast)
 for (const [, def] of Object.entries({ calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen })) {
-  toolManager.register({
-    name: def.name,
-    description: def.description,
-    timeoutMs: 30000,
-    concurrencySafe: true,
-    execute: def.handler,
-  });
-  registerFastMCPTool(def.name, def.description, def.inputSchema, def.handler);
+  registerFastMCPTool(def.name, def.description, def.inputSchema, def.handler, 30000);
 }
 
 // AnySearch (dynamic)
