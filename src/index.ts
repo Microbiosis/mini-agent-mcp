@@ -59,11 +59,21 @@ const server = new FastMCP({
 });
 
 // ─── Register tools via ToolManager ──────────────────────────────────────
-function registerFastMCPTool(name: string, description: string, params: z.ZodObject<any>, handler: (args: any) => Promise<string>) {
+function registerFastMCPTool(name: string, description: string, params: z.ZodObject<any>, handler: (args: any) => Promise<string>, timeoutMs = 120000) {
+  // Register with ToolManager first (so toolManager.execute() can find it)
+  toolManager.register({
+    name,
+    description,
+    timeoutMs,
+    concurrencySafe: true,
+    execute: handler,
+  });
+  // Then register with FastMCP server (also pass timeoutMs so the MCP host sees it)
   server.addTool({
     name,
     description,
     parameters: params,
+    timeoutMs,
     execute: (args) => toolManager.execute(name, args as Record<string, unknown>),
   });
 }
@@ -94,10 +104,9 @@ for (const [, def] of Object.entries({ calculator, textStats, textTransform, uni
           const result = await (t.handler as (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>)(args);
           return result.content.map((c) => c.text).join("\n");
         },
-      });
-      registerFastMCPTool(t.name, t.description, t.inputSchema as any, t.handler as any);
-    }
-    console.error(`[AnySearch] ${anyTools.length} tools registered via ToolManager`);
+	    });
+	    }
+	    console.error(`[AnySearch] ${anyTools.length} tools registered via ToolManager (Agent-internal only)`);
   } catch {
     console.error("[AnySearch] Not available (search tools disabled)");
   }
@@ -149,7 +158,7 @@ registerFastMCPTool(
   }
 );
 
-// ─── Deep Research ──────────────────────────────────────────────────────────
+// ─── Deep Research (5 min timeout — research takes multiple LLM calls) ──────
 registerFastMCPTool(
   "deep_research",
   "Run a deep research workflow on a question. Breaks down the question, searches for each sub-topic, and produces a comprehensive report.",
@@ -163,7 +172,8 @@ registerFastMCPTool(
       "",
       result.report,
     ].join("\n");
-  }
+  },
+  300000 // 5 min timeout
 );
 
 // ─── Memory ──────────────────────────────────────────────────────────────────
