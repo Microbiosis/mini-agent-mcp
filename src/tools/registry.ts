@@ -66,11 +66,22 @@ export function rebuildToolMap(tools: ToolDefinition[]): Map<string, ToolDefinit
 export function getToolDescriptions(tools: ToolDefinition[]): string {
   return tools
     .map((t) => {
-      const params = Object.entries(t.inputSchema.properties)
+      // Defensive: anysearch-sourced tools may lack properties/required
+      // after upstream schema drift; fall back to empty objects/arrays
+      // so a single bad tool doesn't take down prompt rendering.
+      const schema = (t.inputSchema ?? {}) as {
+        properties?: Record<string, unknown>;
+        required?: string[];
+      };
+      const properties = (schema.properties && typeof schema.properties === "object"
+        ? schema.properties
+        : {}) as Record<string, unknown>;
+      const required = Array.isArray(schema.required) ? schema.required : [];
+      const params = Object.entries(properties)
         .map(([key, val]) => {
           const v = val as { type?: string; description?: string };
-          const required = t.inputSchema.required.includes(key);
-          return `    - ${key} (${v.type || "any"})${required ? " [required]" : ""}: ${v.description || ""}`;
+          const isRequired = required.includes(key);
+          return `    - ${key} (${v.type || "any"})${isRequired ? " [required]" : ""}: ${v.description || ""}`;
         })
         .join("\n");
       return `  Tool: ${t.name}\n    Description: ${t.description}\n    Parameters:\n${params}`;
