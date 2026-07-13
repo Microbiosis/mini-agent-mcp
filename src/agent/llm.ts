@@ -142,9 +142,17 @@ function getOpenAIClient(): OpenAI | null {
 
   if (openaiClient) return openaiClient;
 
+  // Normalize baseURL: ensure /v1 (or version path) is present.
+  // OpenAI SDK builds URLs as {baseURL}/{path}, and the path is like
+  // "chat/completions" (no /v1 prefix), so the baseURL must include /v1.
+  let baseURL = cfg.baseUrl.replace(/\/+$/, "");
+  if (!/\/(v1|v\d+)(\/|$)/.test(baseURL)) {
+    baseURL = baseURL + "/v1";
+  }
+
   openaiClient = new OpenAI({
     apiKey: cfg.apiKey,
-    baseURL: cfg.baseUrl.replace(/\/+$/, ""),
+    baseURL,
   });
 
   return openaiClient;
