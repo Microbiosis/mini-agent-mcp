@@ -84,16 +84,42 @@ export function setLLMServer(server: Server): void {
 
 // ─── Config helpers ──────────────────────────────────────────────────────────
 
-/** Get LLM config from environment variables — all fields required, no defaults */
-export function getLLMConfig(): LLMConfig | null {
+/**
+ * Load provider config from env vars + optional providers.json.
+ *
+ * Priority:
+ *   1. LLM_PROVIDER env selects named provider from providers.json
+ *   2. Fallback: LLM_API_KEY + LLM_BASE_URL + LLM_MODEL (default provider)
+ */
+function loadProviderConfig(): LLMConfig | null {
+  const providerName = process.env.LLM_PROVIDER || "default";
+  const providersPath = process.env.LLM_PROVIDERS_PATH;
+
+  // Try to load named provider from providers config file
+  if (providersPath && providerName !== "default") {
+    try {
+      const { readFileSync, existsSync } = require("node:fs");
+      if (existsSync(providersPath)) {
+        const content = JSON.parse(readFileSync(providersPath, "utf8"));
+        const provider = content.providers?.[providerName];
+        if (provider?.apiKey && provider?.baseUrl && provider?.model) {
+          return provider as LLMConfig;
+        }
+      }
+    } catch { /* fall through to env vars */ }
+  }
+
+  // Fallback: env vars as default provider
   const apiKey = process.env.LLM_API_KEY;
   const baseUrl = process.env.LLM_BASE_URL;
   const model = process.env.LLM_MODEL;
-
-  if (!apiKey || !baseUrl || !model) {
-    return null;
-  }
+  if (!apiKey || !baseUrl || !model) return null;
   return { apiKey, baseUrl, model };
+}
+
+/** Get LLM config (backward-compatible) */
+export function getLLMConfig(): LLMConfig | null {
+  return loadProviderConfig();
 }
 
 /** Get max tokens from env var, default 4096 */

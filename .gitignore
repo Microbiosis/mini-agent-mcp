@@ -9,8 +9,12 @@ dist/
 .env.local
 .env.*.local
 
-# Agent project notes (AIGC metadata)
-Agent*总结*.md
+# Runtime data
+.memory/
+.skills/
+
+# AIGC notes
+Agent项目收集总结.md
 
 # Logs
 *.log

@@ -1,21 +1,44 @@
 /**
  * ReAct Agent — Reasoning + Acting loop.
  *
- * Flow:
- *   1. Agent receives a task
- *   2. Agent thinks about what to do (Thought)
- *   3. Agent chooses a tool and provides input (Action + Action Input)
- *   4. Tool executes, result is observed (Observation)
- *   5. Repeat 2-4 until agent has enough info
- *   6. Agent produces Final Answer
- *
- * If no LLM API key is configured, falls back to a rule-based agent
- * that pattern-matches the task and calls appropriate tools.
+ * Hooks system (Yao pattern):
+ *   - CreateHook: runs before each LLM call, can modify messages
+ *   - NextHook: runs after each LLM call, can validate output
  */
 
 import { allTools, getTool, getToolDescriptions, buildToolList } from "../tools/registry.js";
 import type { ToolDefinition as MCPToolDef, ToolResult } from "../tools/types.js";
 import { callLLM, getLLMConfig, getLLMMode, type LLMMessage, type ToolDefinition as LLMToolDef } from "./llm.js";
+import { matchSkill, useSkill } from "../skill/index.js";
+
+// ─── Hooks System ──────────────────────────────────────────────────────────
+export interface HookContext {
+  task: string;
+  step: number;
+  maxSteps: number;
+}
+
+export type CreateHook = (ctx: HookContext, messages: LLMMessage[]) => Promise<LLMMessage[] | null>;
+export type NextHook = (ctx: HookContext, response: { content: string | null; toolCalls?: any[] }) => Promise<"continue" | "stop" | null>;
+
+let createHooks: CreateHook[] = [];
+let nextHooks: NextHook[] = [];
+
+/** Register a CreateHook (runs before each LLM call) */
+export function addCreateHook(hook: CreateHook): void {
+  createHooks.push(hook);
+}
+
+/** Register a NextHook (runs after each LLM call) */
+export function addNextHook(hook: NextHook): void {
+  nextHooks.push(hook);
+}
+
+/** Clear all hooks */
+export function clearHooks(): void {
+  createHooks = [];
+  nextHooks = [];
+}
 
 export interface AgentStep {
   thought: string;
@@ -35,7 +58,19 @@ export interface AgentResult {
   llmMode?: "sampling" | "http";
 }
 
-const MAX_STEPS = 8;
+/** Max steps per agent run (env AGENT_MAX_TURNS, default 8) */
+const MAX_STEPS = (() => {
+  const val = process.env.AGENT_MAX_TURNS;
+  if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n > 0 && n <= 50) return n; }
+  return 8;
+})();
+
+/** Max tool retries on failure (env AGENT_TOOL_RETRY, default 1) */
+const TOOL_RETRY = (() => {
+  const val = process.env.AGENT_TOOL_RETRY;
+  if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n >= 0 && n <= 3) return n; }
+  return 1;
+})();
 
 const SYSTEM_PROMPT = `You are a helpful agent that solves tasks by using tools.
 You have access to the following tools:
@@ -156,11 +191,46 @@ Rules:
     { role: "user", content: `Task: ${task}` },
   ];
 
+  // Auto-apply matched skill (self-improvement)
+  const matchedSkill = matchSkill(task);
+  if (matchedSkill) {
+    console.error(`[Skill] Auto-applied: "${matchedSkill.name}" (used ${matchedSkill.useCount + 1}x)`);
+    messages.push({ role: "user", content: `Hint: A similar task was handled before. Approach: ${matchedSkill.steps.join(", ")}` });
+    useSkill(matchedSkill.id);
+  }
+
   for (let i = 0; i < MAX_STEPS; i++) {
+    // ── CreateHook: before LLM call ──
+    const ctx: HookContext = { task, step: i, maxSteps: MAX_STEPS };
+    for (const hook of createHooks) {
+      const modified = await hook(ctx, messages);
+      if (modified === null) {
+        throw new Error("LLM call cancelled by CreateHook");
+      }
+      // If hook returned modified messages, use them
+      if (modified) messages.length = 0 && messages.push(...modified);
+    }
+
     const llmResponse = await callLLM(messages, openaiTools, "auto");
 
     if (llmResponse.error) {
       throw new Error(llmResponse.errorMessage || "LLM call failed");
+    }
+
+    // ── NextHook: after LLM call ──
+    for (const hook of nextHooks) {
+      const decision = await hook(ctx, {
+        content: llmResponse.content,
+        toolCalls: llmResponse.toolCalls,
+      });
+      if (decision === "stop") return {
+        success: true,
+        answer: llmResponse.content || "Task stopped by NextHook.",
+        steps,
+        totalSteps: steps.length,
+        llmPowered: true,
+        llmMode: mode,
+      };
     }
 
     // === Handle tool_calls (function calling) ===
@@ -179,20 +249,30 @@ Rules:
         }
         step.actionInput = args;
 
-        // Execute the tool
+        // Execute the tool with retry
         const tool = availableToolMap.get(tc.function.name) || getTool(tc.function.name);
         if (tool) {
-          try {
-            const result: ToolResult = await tool.handler(args);
-            const obsText = result.content
-              .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-              .join("\n");
-            step.observation = obsText;
-            messages.push({ role: "tool", tool_call_id: tc.id, content: obsText });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            step.observation = `Error: ${msg}`;
-            messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${msg}` });
+          let lastError: string | null = null;
+          for (let attempt = 1; attempt <= TOOL_RETRY + 1; attempt++) {
+            try {
+              const result: ToolResult = await tool.handler(args);
+              const obsText = result.content
+                .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
+                .join("\n");
+              step.observation = obsText;
+              messages.push({ role: "tool", tool_call_id: tc.id, content: obsText });
+              lastError = null;
+              break;
+            } catch (err) {
+              lastError = err instanceof Error ? err.message : String(err);
+              if (attempt <= TOOL_RETRY) {
+                await new Promise((r) => setTimeout(r, 1000 * attempt));
+              }
+            }
+          }
+          if (lastError) {
+            step.observation = `Error: ${lastError}`;
+            messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${lastError}` });
           }
         } else {
           const err = `Tool '${tc.function.name}' not found`;
@@ -496,8 +576,8 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
  * Main entry point — runs the agent on a task.
  * Priority: MCP sampling (client model) > Direct HTTP > Rule-based
  */
-export async function runAgent(task: string, forcedMode?: "rule"): Promise<AgentResult> {
-  const mode = forcedMode === "rule" ? "none" : getLLMMode();
+export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentResult> {
+  const mode = forceMode === "rule" ? "none" : getLLMMode();
 
   if (mode === "sampling") {
     // 1) Try MCP sampling first
