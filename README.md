@@ -17,8 +17,8 @@
 
 `mini-agent-mcp` 是一个遵循 [Model Context Protocol (MCP)](https://modelcontextprotocol.io) 的 **stdio / SSE 服务器**：
 
-- 通过 stdio 暴露 **14 个 MCP 工具**给 AI 客户端（Claude Desktop、ZCode CLI 等）
-- 内部托管一个 **ReAct 推理代理**，能自主调用工具完成任务
+- **对外**只暴露 **1 个 MCP 工具：`run_agent`**——用于没有子 Agent 的应用注入一个"子智能体"
+- **对内**托管一个 **ReAct 推理代理**，自主调用 14 个内部工具（6 个基础工具 + 4 个 AnySearch 工具 + 高级 pipeline 等）完成任务
 - 内置 **DAG 工作流**与**多阶段深度研究**管线
 - 通过 **ToolManager** 统一管理超时、并发、重试、门禁
 - 通过 **`.memory/` 与 `.skills/`** 实现本地持久化记忆和技能学习
@@ -52,25 +52,27 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       MCP 客户端 (Claude / ZCode)                   │
-│     tools/list · tools/call (JSON-RPC over stdio / SSE)             │
+│              tools/list 只见 1 个工具: run_agent                    │
+│              tools/call 仅可调 run_agent                            │
 └─────────────────────────────┬───────────────────────────────────────┘
-                              │ 14 个 MCP 工具（启动即注册）
+                              │ run_agent(task)
 ┌─────────────────────────────▼───────────────────────────────────────┐
 │                         FastMCP Server                              │
-│   src/index.ts  ── register() ── server.addTool()                   │
+│              run_agent — 唯一对外的 MCP 工具                          │
 └─────────────────────────────┬───────────────────────────────────────┘
                               │
 ┌─────────────────────────────▼───────────────────────────────────────┐
 │                       ToolManager (singleton)                       │
 │   超时 / 并发上限 / 智能重试 / 输入门禁 / 调用历史                  │
+│   14 个内部工具（外面看不见）                                       │
 └─────────────────────────────┬───────────────────────────────────────┘
                               │
         ┌─────────────────────┼──────────────────────┐
         │                     │                      │
         ▼                     ▼                      ▼
-   6 个本地工具       run_agent / run_workflow /   remember / recall
-   (calculator, ...   deep_research / 记忆 / 技能   extract_skill ...
-                     等 8 个复合工具)              (持久化到 .memory / .skills)
+   6 个本地工具       run_agent（唯一对外工具）     .memory / .skills
+   (calculator, ...   + 内部高级 pipeline              (持久化)
+                     仅 Agent 内部使用)
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -99,7 +101,7 @@
 └─────────────────────────────────────────────────────────────────────┘
 
 **AnySearch 懒加载时序**：
-1. 服务器启动 → 仅注册 6 个本地工具 + 8 个复合工具
+1. 服务器启动 → 仅注册 `run_agent` 到 FastMCP + 6 个本地工具到内部 ToolManager
 2. 客户端调用 `run_agent` → Agent 触发 `ensureAnySearchTools()`
 3. 首次：HTTP 连接到 `api.anysearch.com/mcp` 发现工具，缓存 1 小时
 4. 后续：命中缓存（除非 TTL 过期或调用 `resetAnySearchCache()`）
@@ -198,69 +200,78 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 ---
 
-## 五、MCP 工具完整参考
+## 五、MCP 工具参考
 
-服务器通过 `tools/list` 暴露 **14 个 MCP 工具**，按功能分组如下：
-
-### 5.1 基础工具（6 个 — 同步、确定性）
-
-| 工具 | 参数 | 用途 | 返回 |
-|------|------|------|------|
-| `calculator` | `expression: string` | 安全数学求值（递归下降解析器，无 `eval()`）。支持 `+ - * / % ^`、括号、函数 `sqrt abs sin cos tan asin acos atan log ln exp floor ceil round`、常量 `pi e` | 数值 |
-| `text_stats` | `text: string` | 字符数（含/不含空格）、词数、句数、段数、平均词长、平均句长、Top 5 高频词 | 文本报告 |
-| `text_transform` | `text: string`<br>`operation: 'uppercase'\|'lowercase'\|'titlecase'\|'reverse'\|'trim'\|'remove_duplicates'\|'sort_lines'\|'count_substring'\|'replace'`<br>`pattern?: string`<br>`replacement?: string` | 9 种文本转换；`replace` 走 `split/join`（非正则） | 转换结果 |
-| `unit_convert` | `value: number`<br>`from: string`<br>`to: string` | 同类单位换算：`length` (mm/cm/m/km/inch/ft/yard/mile)、`weight` (mg/g/kg/ton/oz/lb)、`temperature` (C/F/K)、`data` (bit/byte/KB/MB/GB/TB) | 数值 |
-| `datetime_info` | `operation: 'now'\|'format'\|'diff'`<br>`timezone?: string`<br>`date?: string`<br>`date2?: string`<br>`format?: string` | 当前时间（带时区）、自定义格式 (`YYYY MM DD HH mm ss dddd`)、两日期间差（天/时/分/方向） | 时间文本 |
-| `random_gen` | `operation: 'number'\|'uuid'\|'password'\|'pick'\|'shuffle'`<br>`min?: number` `max?: number`<br>`length?: number` `uppercase?: boolean` `symbols?: boolean`<br>`items?: string[]` `count?: number` | 随机整数、UUID v4（含强度评级的密码）、列表采样、Fisher-Yates 洗牌 | 随机值 |
-
-### 5.2 智能代理工具（3 个）
+### 5.1 唯一对外工具（外部 Agent 唯一可调）
 
 | 工具 | 参数 | 用途 | 超时 |
 |------|------|------|------|
-| `run_agent` | `task: string`<br>`mode?: 'auto'\|'rule'` | 启动 ReAct Agent；`rule` 强制正则模式（无需 LLM）。返回推理轨迹 + 最终答案 | 120s |
-| `run_workflow` | `steps: string` (JSON 数组) | 执行 DAG 工作流；详见 §7 | 120s |
-| `deep_research` | `question: string` | 三阶段深度研究：拆解 → 检索 → 综合；详见 §8 | 300s |
+| `run_agent` | `task: string`<br>`mode?: 'auto'\|'rule'` | 把任务委派给内置 ReAct Agent；Agent 自动选择并调用 14 个内部工具完成。`rule` 强制正则模式（无需 LLM） | 120s |
 
-**`run_agent` 返回结构**（基于 `src/agent/index.ts` 的真实输出格式）：
+**`run_agent` 返回结构**：
 
 ```
-=== Agent Result ===
 Task: 计算 sqrt(15) + 8
-Mode: LLM-powered (MCP sampling)
+Mode: LLM-powered (HTTP)
 Steps: 2
-Success: true
 
 --- Reasoning Trace ---
 [Step 1]
-  Thought: I need to compute sqrt(15) + 8.
+  Thought: ...
   Action: calculator
-  Input: {"expression":"sqrt(15) + 8"}
   Observation: Expression: sqrt(15) + 8
 Result: 11.872983346207417
 [Step 2]
-  Thought: The calculator returned the precise value; I'll round it for readability.
+  Thought: ...
   Final Answer: 11.87
 
 --- Final Answer ---
 11.87
 ```
 
-> 注：`Observation` 行末尾的换行是 `calculator` 工具返回字符串里自带的 `\n`（格式为 `Expression: <expr>\nResult: <value>`），并非 Markdown 排版问题，真实输出也会呈现为两行。
+### 5.2 内部工具（仅 Agent 可见，外部 tools/list 不可见）
 
-### 5.3 记忆工具（3 个 — 持久化到 `.memory/memories.json`）
+下面 14 个工具**不**通过 MCP `tools/list` 暴露——只能由 `run_agent` 内的 ReAct 循环自动调用。客户端 Agent 通过 `run_agent(task)` 委派任务，Agent 在内部根据需要挑选并执行这些工具。
 
-| 工具 | 参数 | 用途 |
-|------|------|------|
-| `remember` | `type: 'fact'\|'preference'\|'task'\|'conversation'`<br>`content: string`<br>`tags?: string` (逗号分隔) | 存储一条记忆 |
-| `recall` | `tags: string` (逗号分隔) | 按标签检索 Top 5 记忆（按访问频次排序） |
-| `memory_stats` | — | 返回总数 + 按类型分布 |
+#### 基础工具（6 个 — 同步、确定性）
 
-### 5.4 技能工具（2 个 — 持久化到 `.skills/skills.json`）
+| 内部工具 | 参数 | 用途 |
+|---------|------|------|
+| `calculator` | `expression: string` | 安全数学求值（递归下降解析器，无 `eval()`）。支持 `+ - * / % ^`、括号、函数 `sqrt abs sin cos tan asin acos atan log ln exp floor ceil round`、常量 `pi e` |
+| `text_stats` | `text: string` | 字符数、词数、句数、段数、平均词长、Top 5 高频词 |
+| `text_transform` | `text: string`<br>`operation` (9 种)<br>`pattern?: string`<br>`replacement?: string` | uppercase/lowercase/titlecase/reverse/trim/remove_duplicates/sort_lines/count_substring/replace |
+| `unit_convert` | `value: number`<br>`from: string`<br>`to: string` | 长度/重量/温度/数据单位换算 |
+| `datetime_info` | `operation: 'now'\|'format'\|'diff'` + 配套参数 | 当前时间、格式转换、日期差 |
+| `random_gen` | `operation: 'number'\|'uuid'\|'password'\|'pick'\|'shuffle'` + 配套参数 | 随机整数/UUID/密码/采样/洗牌 |
 
-| 工具 | 参数 | 用途 |
-|------|------|------|
-| `extract_skill` | `name: string`<br>`description: string`<br>`exampleTask: string`<br>`steps: string` (JSON 数组字符串)<br>`tags: string` (逗号分隔) | 提取一个可复用技能 |
-| `list_skills` | — | 列出所有技能（按使用频次降序） |
+#### 高级 pipeline（3 个）
+
+| 内部工具 | 用途 |
+|---------|------|
+| `run_workflow` | DAG 工作流编排（多个 Agent 任务按依赖执行） |
+| `deep_research` | 三阶段深度研究：拆解 → 检索 → 综合 |
+| (复合) | 多阶段研究任务的串联入口 |
+
+#### 记忆工具（3 个 — 持久化到 `.memory/memories.json`）
+
+| 内部工具 | 用途 |
+|---------|------|
+| `remember` | 存储一条记忆（fact/preference/task/conversation） |
+| `recall` | 按标签检索 Top 5 记忆 |
+| `memory_stats` | 返回记忆统计 |
+
+#### 技能工具（2 个 — 持久化到 `.skills/skills.json`）
+
+| 内部工具 | 用途 |
+|---------|------|
+| `extract_skill` | 提取一个可复用技能 |
+| `list_skills` | 列出所有技能 |
+
+#### AnySearch 工具（4 个 — 懒加载）
+
+`anysearch_search` / `anysearch_batch_search` / `anysearch_extract` / `anysearch_get_sub_domains`（详见 §6）
+
+> 💡 **设计意图**：本服务的核心定位是为没有子智能体的 Agent 应用注入"子智能体"能力。外部工具集保持极简（仅 `run_agent`），全部内部工具由 Agent 自治调度，避免暴露过多工具面干扰主 Agent 的选择。
 
 ---
 
@@ -281,7 +292,7 @@ Result: 11.872983346207417
 | `anysearch_extract` | URL 网页内容提取（最多 50,000 字符 Markdown） |
 | `anysearch_get_sub_domains` | 查询垂直领域目录 |
 
-> ⚠️ **这些工具仅注册到内部 ToolManager，供 ReAct Agent 在推理循环中自主调用，*不* 通过 MCP `tools/list` 暴露给外部客户端**——MCP `tools/list` 始终返回固定的 14 个本地工具。
+> ⚠️ **这些工具仅注册到内部 ToolManager，供 ReAct Agent 在推理循环中自主调用，*不* 通过 MCP `tools/list` 暴露给外部客户端**——MCP `tools/list` 始终只返回 1 个工具：`run_agent`。
 
 **匿名可用**：不设 `ANYSEARCH_API_KEY` 也能连接，只是有较低的速率限制；高级使用场景可填 Key 提升配额。
 

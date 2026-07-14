@@ -50,7 +50,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "fastmcp": "^4.4.0",
     "openai": "^6.46.0",
     "zod": "^3.24.0"

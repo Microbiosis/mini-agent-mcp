@@ -12,10 +12,6 @@ import { fileURLToPath } from "node:url";
 // Note: AnySearch is discovered lazily on first run_agent call — not eagerly at startup.
 import { calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen } from "./tools/index.js";
 import { runAgent } from "./agent/react.js";
-import { runWorkflow, type WorkflowStep } from "./workflow/dag.js";
-import { deepResearch } from "./workflow/research.js";
-import { remember, recall, getMemoryStats } from "./memory/index.js";
-import { extractSkill, listSkills, getSkillStats } from "./skill/index.js";
 import { toolManager } from "./tools/manager.js";
 
 // ─── Load .env ────────────────────────────────────────────────────────────
@@ -64,7 +60,26 @@ const server = new FastMCP({
   version: version as `${number}.${number}.${number}`,
 });
 
-// ─── Register tools via ToolManager ──────────────────────────────────────
+// ─── Register an INTERNAL tool (ToolManager only) ────────────────────────
+// Used by the local Agent. NOT exposed to MCP clients via tools/list.
+function registerInternalTool<T extends z.ZodRawShape>(
+  name: string,
+  description: string,
+  params: z.ZodObject<T>,
+  handler: (args: z.infer<z.ZodObject<T>>) => Promise<string>,
+  timeoutMs = 30000,
+  concurrencySafe = true
+) {
+  toolManager.register({
+    name,
+    description,
+    timeoutMs,
+    concurrencySafe,
+    execute: (args: Record<string, unknown>) => handler(args as z.infer<z.ZodObject<T>>),
+  });
+}
+
+// ─── Register an MCP-visible tool (ToolManager + FastMCP) ─────────────────
 function registerFastMCPTool<T extends z.ZodRawShape>(
   name: string,
   description: string,
@@ -73,17 +88,8 @@ function registerFastMCPTool<T extends z.ZodRawShape>(
   handler: (args: z.infer<z.ZodObject<T>>) => Promise<string>,
   timeoutMs = 120000
 ) {
-  // Register with ToolManager first (so toolManager.execute() can find it)
-  // ToolManager's execute() takes Record<string, unknown>; the typed handler
-  // matches structurally but needs a single up-cast at the boundary.
-  toolManager.register({
-    name,
-    description,
-    timeoutMs,
-    concurrencySafe: true,
-    execute: (args: Record<string, unknown>) => handler(args as z.infer<z.ZodObject<T>>),
-  });
-  // Then register with FastMCP server (also pass timeoutMs so the MCP host sees it)
+  registerInternalTool(name, description, params, handler, timeoutMs, true);
+  // Then register with FastMCP server (so MCP host can discover via tools/list)
   server.addTool({
     name,
     description,
@@ -93,7 +99,8 @@ function registerFastMCPTool<T extends z.ZodRawShape>(
   });
 }
 
-// Built-in tools (30s timeout — these are synchronous, deterministic, and fast)
+// Built-in tools (30s timeout — internal-only; the embedded Agent uses them
+// to carry out tasks delegated via run_agent. Not exposed to MCP clients.)
 for (const [, def] of Object.entries({
   calculator,
   textStats,
@@ -102,7 +109,7 @@ for (const [, def] of Object.entries({
   datetimeInfo,
   randomGen,
 })) {
-  registerFastMCPTool(def.name, def.description, def.inputSchema, def.handler, 30000);
+  registerInternalTool(def.name, def.description, def.inputSchema, def.handler, 30000);
 }
 
 // run_agent
@@ -134,138 +141,6 @@ registerFastMCPTool(
       }
     }
     lines.push("--- Final Answer ---", result.answer);
-    return lines.join("\n");
-  }
-);
-
-registerFastMCPTool(
-  "run_workflow",
-  "Run a multi-step DAG workflow. Define steps with dependencies; runs them in order. Each step is an agent task.",
-  z.object({
-    steps: z.string().describe("JSON array of workflow steps: [{id, task, dependsOn?, label?, timeout?}]"),
-  }),
-  async (args) => {
-    let steps: WorkflowStep[];
-    try {
-      steps = JSON.parse(args.steps);
-    } catch {
-      return "Error: steps must be valid JSON";
-    }
-    const result = await runWorkflow(steps);
-    const lines = [
-      `Workflow ${result.success ? "succeeded" : "completed with errors"}`,
-      `Duration: ${(result.totalDurationMs / 1000).toFixed(1)}s`,
-      "",
-    ];
-    for (const s of result.steps) {
-      lines.push(
-        `[${s.id}]${s.label ? " " + s.label : ""} — ${s.error ? "FAIL: " + s.error : "OK"} (${(s.durationMs / 1000).toFixed(1)}s)`
-      );
-    }
-    return lines.join("\n");
-  }
-);
-
-// ─── Deep Research (5 min timeout — research takes multiple LLM calls) ──────
-registerFastMCPTool(
-  "deep_research",
-  "Run a deep research workflow on a question. Breaks down the question, searches for each sub-topic, and produces a comprehensive report.",
-  z.object({ question: z.string().describe("The research question to investigate") }),
-  async (args) => {
-    const result = await deepResearch(args.question);
-    return [
-      `## Deep Research: ${result.question}`,
-      `Sub-questions: ${result.subQuestions.length}`,
-      `Steps: ${result.totalSteps} | Duration: ${(result.durationMs / 1000).toFixed(1)}s`,
-      "",
-      result.report,
-    ].join("\n");
-  },
-  300000 // 5 min timeout
-);
-
-// ─── Memory ──────────────────────────────────────────────────────────────────
-registerFastMCPTool(
-  "remember",
-  "Store a memory (fact, preference, task, or conversation) with tags for later recall.",
-  z.object({
-    type: z.enum(["fact", "preference", "task", "conversation"]).describe("Type of memory"),
-    content: z.string().describe("The content to remember"),
-    tags: z.string().optional().describe("Comma-separated tags for retrieval"),
-  }),
-  async (args) => {
-    const tags = args.tags ? (args.tags as string).split(",").map((t: string) => t.trim()) : [];
-    // args.type is narrowed by z.enum to "fact" | "preference" | "task" | "conversation",
-    // which is a subset of MemoryEntry["type"]. Safe to widen.
-    const memoryType = args.type as Parameters<typeof remember>[0];
-    remember(memoryType, args.content, tags);
-    return `Remembered: ${args.type} — "${args.content.slice(0, 100)}${args.content.length > 100 ? "..." : ""}"`;
-  }
-);
-
-registerFastMCPTool(
-  "recall",
-  "Recall memories by tags. Returns the most relevant memories matching the given tags.",
-  z.object({ tags: z.string().describe("Comma-separated tags to search for") }),
-  async (args) => {
-    const tags = (args.tags as string).split(",").map((t: string) => t.trim());
-    const memories = recall(tags);
-    if (memories.length === 0) return `No memories found for tags: ${tags.join(", ")}`;
-    return memories
-      .map((m, i) => `[${i + 1}] ${m.type}: ${m.content} (tags: ${m.tags.join(", ")})`)
-      .join("\n");
-  }
-);
-
-registerFastMCPTool(
-  "memory_stats",
-  "Get memory statistics: total count and breakdown by type.",
-  z.object({}),
-  async () => {
-    const stats = getMemoryStats();
-    const byType = Object.entries(stats.byType)
-      .map(([k, v]) => `  ${k}: ${v}`)
-      .join("\n");
-    return `Total memories: ${stats.total}\nBy type:\n${byType}`;
-  }
-);
-
-// ─── Skill ───────────────────────────────────────────────────────────────────
-registerFastMCPTool(
-  "extract_skill",
-  "Extract a reusable skill from a completed task. The agent learns how to handle similar tasks in the future.",
-  z.object({
-    name: z.string().describe("Name of the skill"),
-    description: z.string().describe("What this skill does"),
-    exampleTask: z.string().describe("An example task this skill handles"),
-    steps: z.string().describe("JSON array of step descriptions"),
-    tags: z.string().describe("Comma-separated tags for matching new tasks"),
-  }),
-  async (args) => {
-    let steps: string[];
-    try {
-      steps = JSON.parse(args.steps as string);
-    } catch {
-      return "Error: steps must be a valid JSON array of strings";
-    }
-    const tags = (args.tags as string).split(",").map((t: string) => t.trim());
-    const skill = extractSkill(args.name, args.description, args.exampleTask, steps, tags);
-    return `Skill extracted: "${skill.name}" (${tags.join(", ")})`;
-  }
-);
-
-registerFastMCPTool(
-  "list_skills",
-  "List all extracted skills, sorted by use count.",
-  z.object({}),
-  async () => {
-    const skills = listSkills();
-    const stats = getSkillStats();
-    if (skills.length === 0) return "No skills extracted yet. Use extract_skill to create one.";
-    const lines = [`Skills: ${stats.total} | Total uses: ${stats.totalUses}`, ""];
-    for (const s of skills) {
-      lines.push(`  ${s.name} (used ${s.useCount}x) — ${s.description}`);
-    }
     return lines.join("\n");
   }
 );
