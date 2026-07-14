@@ -9,13 +9,15 @@
  *   - Token usage tracking
  *
  * Modes (priority order):
- *   1. MCP Sampling — client handles LLM (zero config)
+ *   1. MCP Sampling — client handles LLM (zero config, when supported)
  *   2. Direct HTTP — SDK calls LLM API directly
  *   3. Rule-based — fallback when no LLM available
  */
 
 import OpenAI from "openai";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { readFileSync, existsSync } from "node:fs";
+import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -98,7 +100,6 @@ function loadProviderConfig(): LLMConfig | null {
   // Try to load named provider from providers config file
   if (providersPath && providerName !== "default") {
     try {
-      const { readFileSync, existsSync } = require("node:fs");
       if (existsSync(providersPath)) {
         const content = JSON.parse(readFileSync(providersPath, "utf8"));
         const provider = content.providers?.[providerName];
@@ -106,7 +107,9 @@ function loadProviderConfig(): LLMConfig | null {
           return provider as LLMConfig;
         }
       }
-    } catch { /* fall through to env vars */ }
+    } catch {
+      /* fall through to env vars */
+    }
   }
 
   // Fallback: env vars as default provider
@@ -237,13 +240,17 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
     }
 
     return {
-      content: "", finishReason: "error", error: true,
+      content: "",
+      finishReason: "error",
+      error: true,
       errorMessage: "MCP sampling returned non-text content",
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      content: "", finishReason: "error", error: true,
+      content: "",
+      finishReason: "error",
+      error: true,
       errorMessage: `MCP sampling failed: ${msg}`,
       errorShouldRetry: false,
     };
@@ -265,16 +272,16 @@ async function callViaOpenAI(
 
   try {
     const maxTokens = getMaxTokens();
-    const body: Record<string, unknown> = {
+    const body: ChatCompletionCreateParamsNonStreaming = {
       model: cfg.model,
-      messages,
+      messages: messages as ChatCompletionCreateParamsNonStreaming["messages"],
       temperature: 0.3,
       max_tokens: maxTokens,
     };
     if (tools) body.tools = tools;
     if (toolChoice) body.tool_choice = toolChoice;
 
-    const response = await client.chat.completions.create(body as any, { timeout: 60_000 });
+    const response = await client.chat.completions.create(body, { timeout: 60_000 });
 
     const choice = response.choices?.[0];
     const content = choice?.message?.content ?? null;
@@ -287,7 +294,9 @@ async function callViaOpenAI(
         content: null,
         finishReason: "tool_calls",
         error: false,
-        toolCalls: (toolCalls as Array<{ id: string; type: string; function: { name: string; arguments: string } }>).map((tc) => ({
+        toolCalls: (
+          toolCalls as Array<{ id: string; type: string; function: { name: string; arguments: string } }>
+        ).map((tc) => ({
           id: tc.id,
           type: "function" as const,
           function: {
@@ -295,11 +304,13 @@ async function callViaOpenAI(
             arguments: tc.function.arguments,
           },
         })),
-        usage: response.usage ? {
-          promptTokens: response.usage.prompt_tokens,
-          completionTokens: response.usage.completion_tokens,
-          totalTokens: response.usage.total_tokens,
-        } : undefined,
+        usage: response.usage
+          ? {
+              promptTokens: response.usage.prompt_tokens,
+              completionTokens: response.usage.completion_tokens,
+              totalTokens: response.usage.total_tokens,
+            }
+          : undefined,
       };
     }
 
@@ -308,7 +319,11 @@ async function callViaOpenAI(
       finishReason: finishReason as LLMResponse["finishReason"],
       error: false,
       usage: response.usage
-        ? { promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens }
+        ? {
+            promptTokens: response.usage.prompt_tokens,
+            completionTokens: response.usage.completion_tokens,
+            totalTokens: response.usage.total_tokens,
+          }
         : undefined,
     };
   } catch (err) {
@@ -316,7 +331,9 @@ async function callViaOpenAI(
     const statusCode = err instanceof OpenAI.APIError ? err.status : undefined;
     console.error(`[OpenAI SDK] Error: ${msg}`);
     return {
-      content: "", finishReason: "error", error: true,
+      content: "",
+      finishReason: "error",
+      error: true,
       errorMessage: `OpenAI SDK error: ${msg}`,
       errorStatusCode: statusCode,
       errorShouldRetry: statusCode === 429 || !statusCode || statusCode >= 500,

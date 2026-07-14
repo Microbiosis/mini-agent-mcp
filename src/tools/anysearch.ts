@@ -18,6 +18,16 @@ import { listAnySearchTools, callAnySearchTool } from "./anysearch-client.js";
 
 /** Cache of dynamically discovered tool definitions */
 let cachedToolDefs: ToolDefinition[] | null = null;
+let cacheTimestamp = 0;
+/** Cache TTL: 1 hour by default. Override via ANYSEARCH_CACHE_TTL_MS env var. */
+const CACHE_TTL_MS = (() => {
+  const v = process.env.ANYSEARCH_CACHE_TTL_MS;
+  if (v) {
+    const n = Number.parseInt(v, 10);
+    if (!Number.isNaN(n) && n >= 0) return n;
+  }
+  return 60 * 60 * 1000;
+})();
 
 /**
  * Normalize an MCP tool's inputSchema so downstream consumers
@@ -42,9 +52,7 @@ function normalizeInputSchema(raw: Record<string, unknown> | undefined): {
       ? (raw.properties as Record<string, unknown>)
       : {};
   const required =
-    raw && typeof raw === "object" && Array.isArray(raw.required)
-      ? (raw.required as string[])
-      : [];
+    raw && typeof raw === "object" && Array.isArray(raw.required) ? (raw.required as string[]) : [];
   return { type: "object", properties, required };
 }
 
@@ -65,10 +73,7 @@ function buildToolDefinitions(tools: Awaited<ReturnType<typeof listAnySearchTool
           return textResult(result);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          return textResult(
-            `Error executing AnySearch tool '${tool.name}': ${msg}`,
-            true
-          );
+          return textResult(`Error executing AnySearch tool '${tool.name}': ${msg}`, true);
         }
       },
     };
@@ -83,20 +88,88 @@ function buildToolDefinitions(tools: Awaited<ReturnType<typeof listAnySearchTool
  * of the server continues to work without search capabilities.
  */
 export async function getAnySearchTools(): Promise<ToolDefinition[]> {
-  if (cachedToolDefs) {
+  // Return cache if still fresh
+  if (cachedToolDefs !== null && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
     return cachedToolDefs;
   }
 
   try {
     const tools = await listAnySearchTools();
     cachedToolDefs = buildToolDefinitions(tools);
+    cacheTimestamp = Date.now();
     return cachedToolDefs;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // On transient failure, preserve the previous cache if we had one.
+    // Better stale tools than no tools at all.
+    if (cachedToolDefs !== null && cachedToolDefs.length > 0) {
+      console.error(`[AnySearch] Refresh failed (${msg}); serving stale cache`);
+      return cachedToolDefs;
+    }
     console.error(`[AnySearch] Failed to discover tools: ${msg}`);
     console.error("[AnySearch] Search tools will be unavailable. Set ANYSEARCH_API_KEY if needed.");
     cachedToolDefs = [];
+    cacheTimestamp = Date.now();
     return cachedToolDefs;
   }
 }
 
+/**
+ * Force-invalidate the cache. Next call to getAnySearchTools() / ensureAnySearchTools()
+ * will re-discover tools from AnySearch.
+ *
+ * Use cases:
+ *   - Tooling scripts that need fresh metadata immediately
+ *   - Tests that swap AnySearch backends
+ *   - Manual override after detecting a tool drift
+ */
+export function resetAnySearchCache(): void {
+  cachedToolDefs = null;
+  cacheTimestamp = 0;
+}
+
+/**
+ * Lazy-discovery + registration. Idempotent.
+ *
+ * Triggers AnySearch tool discovery on first call, registers all
+ * discovered tools into ToolManager (so run_agent can route through
+ * it), and caches for subsequent calls.
+ *
+ * If AnySearch is unreachable, returns an empty array. Safe to call
+ * from cold paths (agent entry points) without blocking startup.
+ */
+export async function ensureAnySearchTools(): Promise<ToolDefinition[]> {
+  // Lazy import to avoid circular dependency (manager imports tools)
+  const { toolManager } = await import("./manager.js");
+
+  const tools = await getAnySearchTools();
+  for (const t of tools) {
+    if (toolManager.get(t.name)) continue; // already registered
+    toolManager.register({
+      name: t.name,
+      description: t.description,
+      timeoutMs: 60000,
+      concurrencySafe: false,
+      execute: async (args) => {
+        const result = await (
+          t.handler as (
+            args: Record<string, unknown>
+          ) => Promise<{ content: Array<{ type: string; text: string }> }>
+        )(args);
+        return result.content.map((c) => c.text).join("\n");
+      },
+    });
+  }
+  return tools;
+}
+
+/**
+ * Lazy-discovery variant: returns existing cache if any, otherwise
+ * returns an empty array WITHOUT triggering the network call.
+ *
+ * Use this from hot paths (e.g. `tools/list`, system prompt rendering)
+ * where blocking on AnySearch discovery would be unacceptable.
+ */
+export function peekAnySearchTools(): ToolDefinition[] {
+  return cachedToolDefs ?? [];
+}

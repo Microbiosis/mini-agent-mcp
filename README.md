@@ -54,7 +54,7 @@
 │                       MCP 客户端 (Claude / ZCode)                   │
 │     tools/list · tools/call (JSON-RPC over stdio / SSE)             │
 └─────────────────────────────┬───────────────────────────────────────┘
-                              │ 14 个 MCP 工具
+                              │ 14 个 MCP 工具（启动即注册）
 ┌─────────────────────────────▼───────────────────────────────────────┐
 │                         FastMCP Server                              │
 │   src/index.ts  ── register() ── server.addTool()                   │
@@ -80,7 +80,8 @@
 │    │                                                              │
 │    │ tool_calls                                                    │
 │    ▼                                                              │
-│  buildToolList() = 6 本地工具 + AnySearch 4 个内部工具               │
+│  buildToolList() = 6 本地工具 + AnySearch 4 个内部工具              │
+│  (AnySearch 懒加载：首次 run_agent 调用时发现并缓存)                │
 │                                                                     │
 │   ┌─────────────────────────┐    ┌─────────────────────────┐       │
 │   │   LLM 模式 (优先级)      │    │     Fallback 链          │       │
@@ -96,6 +97,12 @@
 │   .memory/memories.json   ── 4 类记忆 (fact/preference/task/conv)   │
 │   .skills/skills.json     ── 标签评分技能库                         │
 └─────────────────────────────────────────────────────────────────────┘
+
+**AnySearch 懒加载时序**：
+1. 服务器启动 → 仅注册 6 个本地工具 + 8 个复合工具
+2. 客户端调用 `run_agent` → Agent 触发 `ensureAnySearchTools()`
+3. 首次：HTTP 连接到 `api.anysearch.com/mcp` 发现工具，缓存 1 小时
+4. 后续：命中缓存（除非 TTL 过期或调用 `resetAnySearchCache()`）
 ```
 
 ---
@@ -259,7 +266,13 @@ Result: 11.872983346207417
 
 ## 六、AnySearch 内部工具
 
-启动时，服务器会自动连接 `https://api.anysearch.com/mcp` 并发现以下工具：
+**懒加载**：AnySearch 工具**不在启动时连接**，而是等到首次调用 `run_agent`（或 `deep_research`）时，由 Agent 通过 `ensureAnySearchTools()` 触发发现 + 注册。这样：
+
+- 服务器冷启动不受 AnySearch 网络影响
+- 不使用 Agent 功能的客户端完全跳过 AnySearch
+- 工具列表缓存 1 小时（可用 `ANYSEARCH_CACHE_TTL_MS` 覆盖）
+
+发现后会注册到内部 ToolManager 的工具：
 
 | 内部名称 | 功能 |
 |---------|------|
@@ -268,11 +281,16 @@ Result: 11.872983346207417
 | `anysearch_extract` | URL 网页内容提取（最多 50,000 字符 Markdown） |
 | `anysearch_get_sub_domains` | 查询垂直领域目录 |
 
-> ⚠️ **这些工具仅注册到内部 ToolManager，供 ReAct Agent 在推理循环中自主调用，*不* 通过 MCP `tools/list` 暴露给外部客户端。**
+> ⚠️ **这些工具仅注册到内部 ToolManager，供 ReAct Agent 在推理循环中自主调用，*不* 通过 MCP `tools/list` 暴露给外部客户端**——MCP `tools/list` 始终返回固定的 14 个本地工具。
 
 **匿名可用**：不设 `ANYSEARCH_API_KEY` 也能连接，只是有较低的速率限制；高级使用场景可填 Key 提升配额。
 
-**容错**：MCPRuntime 状态机（`idle → connecting → connected → degraded/error/disabled`）自动处理瞬时错误（重试）和硬错误（401/403/DNS → 禁用），连接失败不会阻塞主服务器启动。
+**缓存策略**：
+- 默认 TTL：1 小时（环境变量 `ANYSEARCH_CACHE_TTL_MS`，设为 `0` 每次过期都重发现）
+- 瞬时失败时：保留旧缓存（serving stale cache）—— 可用工具优先于无工具
+- 手动刷新：调用 `resetAnySearchCache()`（来自 `mini-agent-mcp/agent` 或内部 API）
+
+**容错**：MCPRuntime 状态机（`idle → connecting → connected → degraded/error/disabled`）自动处理瞬时错误（重试）和硬错误（401/403/DNS → 禁用），AnySearch 不可达不会阻塞 Agent 启动。
 
 ---
 
@@ -370,14 +388,16 @@ interface Memory {
 
 ```ts
 interface Skill {
-  id: string;
+  id: string;                  // skill_<timestamp>
   name: string;
   description: string;
   exampleTask: string;
-  steps: string[];          // 步骤描述（注入到消息历史）
-  tags: string[];           // 匹配关键词
-  useCount: number;         // 累计被自动应用次数
-  lastUsed: number;
+  steps: string[];             // 步骤描述（注入到消息历史）
+  tags: string[];              // 匹配关键词
+  useCount: number;            // 累计被自动应用次数
+  createdAt: number;           // 首次创建时间（永不更新）
+  lastUsedAt?: number;         // 最近一次被 matchSkill 匹配并 useSkill() 的时间
+  lastUpdatedAt?: number;      // 最近一次 extractSkill() 覆盖内容的时间
 }
 ```
 
@@ -463,6 +483,7 @@ interface Skill {
 | `TOOL_MAX_CONCURRENT` | 否 | `10` | ToolManager 并发上限 |
 | `TOOL_RETRY_COUNT` | 否 | `2` | 瞬时错误重试（0-5） |
 | `ANYSEARCH_API_KEY` | 否 | 匿名 | AnySearch 提升配额 |
+| `ANYSEARCH_CACHE_TTL_MS` | 否 | `3600000` | AnySearch 工具发现缓存 TTL（毫秒；`0` = 每次过期都重发现） |
 
 ### 12.2 多供应商配置（`providers.json`）
 

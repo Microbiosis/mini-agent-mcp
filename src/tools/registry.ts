@@ -25,9 +25,7 @@ export const allTools: ToolDefinition[] = [
 ];
 
 /** Map for quick lookup by name */
-export const toolMap = new Map<string, ToolDefinition>(
-  allTools.map((t) => [t.name, t])
-);
+export const toolMap = new Map<string, ToolDefinition>(allTools.map((t) => [t.name, t]));
 
 /** Get a tool by name */
 export function getTool(name: string): ToolDefinition | undefined {
@@ -44,10 +42,11 @@ export function getTool(name: string): ToolDefinition | undefined {
 export async function buildToolList(): Promise<ToolDefinition[]> {
   const tools = [...allTools];
 
-  // Dynamically add AnySearch tools (fire-and-forget on failure)
+  // Lazily trigger AnySearch discovery + ToolManager registration.
+  // First call pays the discovery cost (~1-3s); subsequent calls use cache.
   try {
-    const { getAnySearchTools } = await import("./anysearch.js");
-    const anysearchTools = await getAnySearchTools();
+    const { ensureAnySearchTools } = await import("./anysearch.js");
+    const anysearchTools = await ensureAnySearchTools();
     tools.push(...anysearchTools);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -73,9 +72,9 @@ export function getToolDescriptions(tools: ToolDefinition[]): string {
         properties?: Record<string, unknown>;
         required?: string[];
       };
-      const properties = (schema.properties && typeof schema.properties === "object"
-        ? schema.properties
-        : {}) as Record<string, unknown>;
+      const properties = (
+        schema.properties && typeof schema.properties === "object" ? schema.properties : {}
+      ) as Record<string, unknown>;
       const required = Array.isArray(schema.required) ? schema.required : [];
       const params = Object.entries(properties)
         .map(([key, val]) => {

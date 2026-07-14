@@ -55,8 +55,14 @@ function classifyError(err: unknown): "hard" | "transient" {
   const msg = err instanceof Error ? err.message : String(err);
   const lower = msg.toLowerCase();
   // Hard errors: connection refused, DNS failure, auth issues
-  if (lower.includes("refused") || lower.includes("dns") || lower.includes("enotfound")
-    || lower.includes("401") || lower.includes("403") || lower.includes("unauthorized")) {
+  if (
+    lower.includes("refused") ||
+    lower.includes("dns") ||
+    lower.includes("enotfound") ||
+    lower.includes("401") ||
+    lower.includes("403") ||
+    lower.includes("unauthorized")
+  ) {
     return "hard";
   }
   // Transient: timeouts, 429, 5xx
@@ -106,10 +112,7 @@ async function getClient(): Promise<Client> {
       requestInit: apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : undefined,
     });
 
-    client = new Client(
-      { name: "mini-agent-mcp-anysearch", version },
-      { capabilities: {} }
-    );
+    client = new Client({ name: "mini-agent-mcp-anysearch", version }, { capabilities: {} });
 
     await client.connect(transport);
     transition("connected");
@@ -164,7 +167,8 @@ export async function callAnySearchTool(toolName: string, args: Record<string, u
     const response = await c.callTool({ name: toolName, arguments: args }, undefined, { timeout: 60_000 });
 
     const content = response.content as unknown as Array<
-      { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+      | { type: "text"; text: string }
+      | { type: "image"; data: string; mimeType: string }
       | { type: "resource"; resource: { uri: string; text?: string; mimeType?: string } }
     >;
 
@@ -172,7 +176,8 @@ export async function callAnySearchTool(toolName: string, args: Record<string, u
     for (const block of content) {
       if (block.type === "text") parts.push(block.text);
       else if (block.type === "image") parts.push(`[Image: ${block.mimeType}]`);
-      else if (block.type === "resource") parts.push(block.resource.text || `[Resource: ${block.resource.uri}]`);
+      else if (block.type === "resource")
+        parts.push(block.resource.text || `[Resource: ${block.resource.uri}]`);
     }
 
     return parts.join("\n");

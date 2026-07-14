@@ -35,11 +35,8 @@ export const textStatsTool: ToolDefinition = {
     const paragraphs = text.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
     const paragraphCount = paragraphs.length || 1;
     const avgWordLength =
-      wordCount > 0
-        ? (words.reduce((sum, w) => sum + w.length, 0) / wordCount).toFixed(2)
-        : "0";
-    const avgWordsPerSentence =
-      sentenceCount > 0 ? (wordCount / sentenceCount).toFixed(1) : "0";
+      wordCount > 0 ? (words.reduce((sum, w) => sum + w.length, 0) / wordCount).toFixed(2) : "0";
+    const avgWordsPerSentence = sentenceCount > 0 ? (wordCount / sentenceCount).toFixed(1) : "0";
 
     // Word frequency
     const freq: Record<string, number> = {};
@@ -127,10 +124,7 @@ export const textTransformTool: ToolDefinition = {
         result = text.toLowerCase();
         break;
       case "titlecase":
-        result = text.replace(
-          /\w\S*/g,
-          (t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()
-        );
+        result = text.replace(/\w\S*/g, (t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase());
         break;
       case "reverse":
         result = text.split("").reverse().join("");
@@ -145,11 +139,13 @@ export const textTransformTool: ToolDefinition = {
       case "remove_duplicates": {
         const lines = text.split("\n");
         const seen = new Set<string>();
-        result = lines.filter((l) => {
-          if (seen.has(l)) return false;
-          seen.add(l);
-          return true;
-        }).join("\n");
+        result = lines
+          .filter((l) => {
+            if (seen.has(l)) return false;
+            seen.add(l);
+            return true;
+          })
+          .join("\n");
         break;
       }
       case "sort_lines":

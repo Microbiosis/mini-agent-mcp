@@ -9,13 +9,13 @@ import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAnySearchTools } from "./tools/anysearch.js";
+// Note: AnySearch is discovered lazily on first run_agent call — not eagerly at startup.
 import { calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen } from "./tools/index.js";
 import { runAgent } from "./agent/react.js";
-import { runWorkflow } from "./workflow/dag.js";
+import { runWorkflow, type WorkflowStep } from "./workflow/dag.js";
 import { deepResearch } from "./workflow/research.js";
-import { remember, recall, searchMemories, getMemories, getMemoryStats, clearMemories } from "./memory/index.js";
-import { extractSkill, matchSkill, listSkills, getSkillStats } from "./skill/index.js";
+import { remember, recall, getMemoryStats } from "./memory/index.js";
+import { extractSkill, listSkills, getSkillStats } from "./skill/index.js";
 import { toolManager } from "./tools/manager.js";
 
 // ─── Load .env ────────────────────────────────────────────────────────────
@@ -37,12 +37,18 @@ function loadEnvFile(): void {
           if (eqIdx === -1) continue;
           const key = trimmed.slice(0, eqIdx).trim();
           let value = trimmed.slice(eqIdx + 1).trim();
-          if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+          if (
+            (value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"))
+          )
+            value = value.slice(1, -1);
           if (!process.env[key]) process.env[key] = value;
         }
         console.error(`[Config] Loaded .env from ${envPath}`);
         break;
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
@@ -59,14 +65,23 @@ const server = new FastMCP({
 });
 
 // ─── Register tools via ToolManager ──────────────────────────────────────
-function registerFastMCPTool(name: string, description: string, params: z.ZodObject<any>, handler: (args: any) => Promise<string>, timeoutMs = 120000) {
+function registerFastMCPTool<T extends z.ZodRawShape>(
+  name: string,
+  description: string,
+  params: z.ZodObject<T>,
+  // Handler args are the inferred parsed shape of `params` (TS infers T).
+  handler: (args: z.infer<z.ZodObject<T>>) => Promise<string>,
+  timeoutMs = 120000
+) {
   // Register with ToolManager first (so toolManager.execute() can find it)
+  // ToolManager's execute() takes Record<string, unknown>; the typed handler
+  // matches structurally but needs a single up-cast at the boundary.
   toolManager.register({
     name,
     description,
     timeoutMs,
     concurrencySafe: true,
-    execute: handler,
+    execute: (args: Record<string, unknown>) => handler(args as z.infer<z.ZodObject<T>>),
   });
   // Then register with FastMCP server (also pass timeoutMs so the MCP host sees it)
   server.addTool({
@@ -79,31 +94,16 @@ function registerFastMCPTool(name: string, description: string, params: z.ZodObj
 }
 
 // Built-in tools (30s timeout — these are synchronous, deterministic, and fast)
-for (const [, def] of Object.entries({ calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen })) {
+for (const [, def] of Object.entries({
+  calculator,
+  textStats,
+  textTransform,
+  unitConvert,
+  datetimeInfo,
+  randomGen,
+})) {
   registerFastMCPTool(def.name, def.description, def.inputSchema, def.handler, 30000);
 }
-
-// AnySearch (dynamic)
-(async () => {
-  try {
-    const anyTools = await getAnySearchTools();
-    for (const t of anyTools) {
-      toolManager.register({
-        name: t.name,
-        description: t.description,
-        timeoutMs: 60000,
-        concurrencySafe: false,
-        execute: async (args) => {
-          const result = await (t.handler as (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>)(args);
-          return result.content.map((c) => c.text).join("\n");
-        },
-	    });
-	    }
-	    console.error(`[AnySearch] ${anyTools.length} tools registered via ToolManager (Agent-internal only)`);
-  } catch {
-    console.error("[AnySearch] Not available (search tools disabled)");
-  }
-})();
 
 // run_agent
 registerFastMCPTool(
@@ -115,7 +115,12 @@ registerFastMCPTool(
   }),
   async (args) => {
     const result = await runAgent(args.task, args.mode === "rule" ? "rule" : undefined);
-    const lines = [`Task: ${args.task}`, `Mode: ${result.llmPowered ? (result.llmMode === "sampling" ? "LLM (sampling)" : "LLM (HTTP)") : "Rule-based"}`, `Steps: ${result.totalSteps}`, ""];
+    const lines = [
+      `Task: ${args.task}`,
+      `Mode: ${result.llmPowered ? (result.llmMode === "sampling" ? "LLM (sampling)" : "LLM (HTTP)") : "Rule-based"}`,
+      `Steps: ${result.totalSteps}`,
+      "",
+    ];
     if (result.steps.length > 0) {
       lines.push("--- Reasoning Trace ---");
       for (let i = 0; i < result.steps.length; i++) {
@@ -140,12 +145,22 @@ registerFastMCPTool(
     steps: z.string().describe("JSON array of workflow steps: [{id, task, dependsOn?, label?, timeout?}]"),
   }),
   async (args) => {
-    let steps: any[];
-    try { steps = JSON.parse(args.steps); } catch { return "Error: steps must be valid JSON"; }
+    let steps: WorkflowStep[];
+    try {
+      steps = JSON.parse(args.steps);
+    } catch {
+      return "Error: steps must be valid JSON";
+    }
     const result = await runWorkflow(steps);
-    const lines = [`Workflow ${result.success ? "succeeded" : "completed with errors"}`, `Duration: ${(result.totalDurationMs / 1000).toFixed(1)}s`, ""];
+    const lines = [
+      `Workflow ${result.success ? "succeeded" : "completed with errors"}`,
+      `Duration: ${(result.totalDurationMs / 1000).toFixed(1)}s`,
+      "",
+    ];
     for (const s of result.steps) {
-      lines.push(`[${s.id}]${s.label ? " " + s.label : ""} — ${s.error ? "FAIL: " + s.error : "OK"} (${(s.durationMs / 1000).toFixed(1)}s)`);
+      lines.push(
+        `[${s.id}]${s.label ? " " + s.label : ""} — ${s.error ? "FAIL: " + s.error : "OK"} (${(s.durationMs / 1000).toFixed(1)}s)`
+      );
     }
     return lines.join("\n");
   }
@@ -180,7 +195,10 @@ registerFastMCPTool(
   }),
   async (args) => {
     const tags = args.tags ? (args.tags as string).split(",").map((t: string) => t.trim()) : [];
-    remember(args.type as any, args.content, tags);
+    // args.type is narrowed by z.enum to "fact" | "preference" | "task" | "conversation",
+    // which is a subset of MemoryEntry["type"]. Safe to widen.
+    const memoryType = args.type as Parameters<typeof remember>[0];
+    remember(memoryType, args.content, tags);
     return `Remembered: ${args.type} — "${args.content.slice(0, 100)}${args.content.length > 100 ? "..." : ""}"`;
   }
 );
@@ -193,7 +211,9 @@ registerFastMCPTool(
     const tags = (args.tags as string).split(",").map((t: string) => t.trim());
     const memories = recall(tags);
     if (memories.length === 0) return `No memories found for tags: ${tags.join(", ")}`;
-    return memories.map((m, i) => `[${i + 1}] ${m.type}: ${m.content} (tags: ${m.tags.join(", ")})`).join("\n");
+    return memories
+      .map((m, i) => `[${i + 1}] ${m.type}: ${m.content} (tags: ${m.tags.join(", ")})`)
+      .join("\n");
   }
 );
 
@@ -203,7 +223,9 @@ registerFastMCPTool(
   z.object({}),
   async () => {
     const stats = getMemoryStats();
-    const byType = Object.entries(stats.byType).map(([k, v]) => `  ${k}: ${v}`).join("\n");
+    const byType = Object.entries(stats.byType)
+      .map(([k, v]) => `  ${k}: ${v}`)
+      .join("\n");
     return `Total memories: ${stats.total}\nBy type:\n${byType}`;
   }
 );
@@ -221,7 +243,11 @@ registerFastMCPTool(
   }),
   async (args) => {
     let steps: string[];
-    try { steps = JSON.parse(args.steps as string); } catch { return "Error: steps must be a valid JSON array of strings"; }
+    try {
+      steps = JSON.parse(args.steps as string);
+    } catch {
+      return "Error: steps must be a valid JSON array of strings";
+    }
     const tags = (args.tags as string).split(",").map((t: string) => t.trim());
     const skill = extractSkill(args.name, args.description, args.exampleTask, steps, tags);
     return `Skill extracted: "${skill.name}" (${tags.join(", ")})`;
@@ -257,9 +283,16 @@ if (process.argv.includes("--test")) {
   };
   for (const tool of toolManager.list()) {
     const args = testArgs[tool.name];
-    if (!args) { console.log(`--- ${tool.name} ---\n(skipped)\n`); continue; }
+    if (!args) {
+      console.log(`--- ${tool.name} ---\n(skipped)\n`);
+      continue;
+    }
     console.log(`--- ${tool.name} ---`);
-    try { console.log(await tool.execute(args)); } catch { console.log("(error)"); }
+    try {
+      console.log(await tool.execute(args));
+    } catch {
+      console.log("(error)");
+    }
     console.log("");
   }
   console.log("=== All tests passed ===");
@@ -267,9 +300,11 @@ if (process.argv.includes("--test")) {
 }
 
 // ─── Start Server ────────────────────────────────────────────────────────
-server.start({ transportType: process.argv.includes("--sse") ? "httpStream" : "stdio" } as any).catch((err) => {
+server.start({ transportType: process.argv.includes("--sse") ? "httpStream" : "stdio" }).catch((err) => {
   console.error(`Fatal: ${err.message}`);
   process.exit(1);
 });
 
-console.error(`Mini Agent MCP v${version} started | Tools: ${toolManager.size} | MaxConcurrent: ${process.env.TOOL_MAX_CONCURRENT || 10}`);
+console.error(
+  `Mini Agent MCP v${version} started | Tools: ${toolManager.size} | MaxConcurrent: ${process.env.TOOL_MAX_CONCURRENT || 10}`
+);

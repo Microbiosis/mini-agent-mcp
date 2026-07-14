@@ -29,7 +29,9 @@ function loadAll(): MemoryEntry[] {
   if (!existsSync(MEMORY_FILE)) return [];
   try {
     return JSON.parse(readFileSync(MEMORY_FILE, "utf8"));
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 function saveAll(entries: MemoryEntry[]): void {
@@ -62,10 +64,12 @@ export function recall(tags: string[], limit = 5): MemoryEntry[] {
 
   // Increment access count
   for (const m of matched) m.accessCount++;
-  saveAll(loadAll().map((e) => {
-    const found = matched.find((m) => m.id === e.id);
-    return found || e;
-  }));
+  saveAll(
+    loadAll().map((e) => {
+      const found = matched.find((m) => m.id === e.id);
+      return found || e;
+    })
+  );
 
   return matched;
 }

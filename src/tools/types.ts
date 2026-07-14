@@ -17,10 +17,7 @@ export interface ToolDefinition {
 }
 
 export interface ToolResult {
-  content: Array<
-    | { type: "text"; text: string }
-    | { type: "json"; json: unknown }
-  >;
+  content: Array<{ type: "text"; text: string } | { type: "json"; json: unknown }>;
   isError?: boolean;
 }
 

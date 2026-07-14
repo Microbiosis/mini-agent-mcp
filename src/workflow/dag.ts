@@ -61,13 +61,7 @@ export function buildStepTask(step: WorkflowStep, completed: Map<string, string>
 
   if (blocks.length === 0) return step.task;
 
-  return [
-    step.task,
-    "",
-    "---",
-    "Results from previous steps:",
-    ...blocks,
-  ].join("\n");
+  return [step.task, "", "---", "Results from previous steps:", ...blocks].join("\n");
 }
 
 /**
@@ -124,27 +118,44 @@ export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult
     }
 
     // Run ready steps in parallel (independent branches)
-    const stepResults = await Promise.all(ready.map(async (step) => {
-      const stepStart = Date.now();
-      try {
-        const timeoutMs = (step.timeout || 60) * 1000;
-        // Inject predecessor results so dependencies see their context.
-        const effectiveTask = buildStepTask(step, completed);
-        const result = await Promise.race([
-          runAgent(effectiveTask),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Workflow step '${step.id}' timed out after ${timeoutMs}ms`)), timeoutMs)
-          ),
-        ]);
-        const duration = Date.now() - stepStart;
-        completed.set(step.id, result.answer);
-        return { id: step.id, label: step.label, result: result.answer, error: undefined, durationMs: duration };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        completed.set(step.id, "");
-        return { id: step.id, label: step.label, result: "", error: msg, durationMs: Date.now() - stepStart };
-      }
-    }));
+    const stepResults = await Promise.all(
+      ready.map(async (step) => {
+        const stepStart = Date.now();
+        try {
+          const timeoutMs = (step.timeout || 60) * 1000;
+          // Inject predecessor results so dependencies see their context.
+          const effectiveTask = buildStepTask(step, completed);
+          const result = await Promise.race([
+            runAgent(effectiveTask),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`Workflow step '${step.id}' timed out after ${timeoutMs}ms`)),
+                timeoutMs
+              )
+            ),
+          ]);
+          const duration = Date.now() - stepStart;
+          completed.set(step.id, result.answer);
+          return {
+            id: step.id,
+            label: step.label,
+            result: result.answer,
+            error: undefined,
+            durationMs: duration,
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          completed.set(step.id, "");
+          return {
+            id: step.id,
+            label: step.label,
+            result: "",
+            error: msg,
+            durationMs: Date.now() - stepStart,
+          };
+        }
+      })
+    );
     results.push(...stepResults);
   }
 

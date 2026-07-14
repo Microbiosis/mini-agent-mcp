@@ -108,7 +108,9 @@ export const randomGenTool: ToolDefinition = {
           [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
         }
         const picked = shuffled.slice(0, count);
-        return textResult(`Picked ${count} from ${items.length} items:\n${picked.map((p, i) => `  ${i + 1}. ${p}`).join("\n")}`);
+        return textResult(
+          `Picked ${count} from ${items.length} items:\n${picked.map((p, i) => `  ${i + 1}. ${p}`).join("\n")}`
+        );
       }
 
       case "shuffle": {

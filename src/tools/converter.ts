@@ -90,12 +90,7 @@ function convertTemperature(value: number, from: string, to: string): number {
   }
 }
 
-function convertGeneric(
-  value: number,
-  from: string,
-  to: string,
-  factors: Record<string, number>
-): number {
+function convertGeneric(value: number, from: string, to: string, factors: Record<string, number>): number {
   if (!(from in factors)) {
     throw new Error(`Unknown unit: ${from}. Available: ${Object.keys(factors).join(", ")}`);
   }
@@ -145,8 +140,7 @@ export const unitConvertTool: ToolDefinition = {
     // Detect category
     const fromLower = from.toLowerCase();
     const tempUnits = ["c", "f", "k", "celsius", "fahrenheit", "kelvin"];
-    const isTemp =
-      tempUnits.includes(fromLower) && tempUnits.includes(to.toLowerCase());
+    const isTemp = tempUnits.includes(fromLower) && tempUnits.includes(to.toLowerCase());
 
     try {
       let result: number;
@@ -178,9 +172,7 @@ export const unitConvertTool: ToolDefinition = {
       }
 
       const rounded = Math.round(result * 1e6) / 1e6;
-      return textResult(
-        `${value} ${from} = ${rounded} ${to}\n(category: ${category})`
-      );
+      return textResult(`${value} ${from} = ${rounded} ${to}\n(category: ${category})`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return textResult(`Conversion error: ${msg}`, true);

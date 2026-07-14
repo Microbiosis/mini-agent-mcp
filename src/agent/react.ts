@@ -6,10 +6,18 @@
  *   - NextHook: runs after each LLM call, can validate output
  */
 
-import { allTools, getTool, getToolDescriptions, buildToolList } from "../tools/registry.js";
-import type { ToolDefinition as MCPToolDef, ToolResult } from "../tools/types.js";
-import { callLLM, getLLMConfig, getLLMMode, type LLMMessage, type ToolDefinition as LLMToolDef } from "./llm.js";
+import { allTools, getTool, buildToolList } from "../tools/registry.js";
+import type { ToolDefinition as MCPToolDef } from "../tools/types.js";
+import {
+  callLLM,
+  getLLMConfig,
+  getLLMMode,
+  type LLMMessage,
+  type ToolCall,
+  type ToolDefinition as LLMToolDef,
+} from "./llm.js";
 import { matchSkill, useSkill } from "../skill/index.js";
+import { toolManager } from "../tools/manager.js";
 
 // ─── Hooks System ──────────────────────────────────────────────────────────
 export interface HookContext {
@@ -19,7 +27,10 @@ export interface HookContext {
 }
 
 export type CreateHook = (ctx: HookContext, messages: LLMMessage[]) => Promise<LLMMessage[] | null>;
-export type NextHook = (ctx: HookContext, response: { content: string | null; toolCalls?: any[] }) => Promise<"continue" | "stop" | null>;
+export type NextHook = (
+  ctx: HookContext,
+  response: { content: string | null; toolCalls?: ToolCall[] }
+) => Promise<"continue" | "stop" | null>;
 
 let createHooks: CreateHook[] = [];
 let nextHooks: NextHook[] = [];
@@ -58,87 +69,15 @@ export interface AgentResult {
   llmMode?: "sampling" | "http";
 }
 
-/** Max steps per agent run (env AGENT_MAX_TURNS, default 8) */
+/** Max steps per agent run (env AGENT_MAX_TURNS, default 5) */
 const MAX_STEPS = (() => {
   const val = process.env.AGENT_MAX_TURNS;
-  if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n > 0 && n <= 50) return n; }
+  if (val) {
+    const n = parseInt(val, 10);
+    if (!isNaN(n) && n > 0 && n <= 50) return n;
+  }
   return 5;
 })();
-
-/** Max tool retries on failure (env AGENT_TOOL_RETRY, default 1) */
-const TOOL_RETRY = (() => {
-  const val = process.env.AGENT_TOOL_RETRY;
-  if (val) { const n = parseInt(val, 10); if (!isNaN(n) && n >= 0 && n <= 3) return n; }
-  return 1;
-})();
-
-const SYSTEM_PROMPT = `You are a helpful agent that solves tasks by using tools.
-You have access to the following tools:
-
-{TOOL_DESCRIPTIONS}
-
-To use a tool, respond in EXACTLY this format:
-
-Thought: <your reasoning about what to do next>
-Action: <tool_name>
-Action Input: <JSON object with the tool's parameters>
-
-Example:
-Thought: I need to calculate the result of 15 * 23
-Action: calculator
-Action Input: {"expression": "15 * 23"}
-
-After receiving the tool result (Observation), you continue reasoning.
-
-When you have enough information to answer the original task, respond with:
-
-Thought: <brief summary of what you found>
-Final Answer: <your complete answer to the task>
-
-Rules:
-- Always use exactly one tool at a time.
-- Action Input must be valid JSON matching the tool's parameters.
-- If a task doesn't need any tool, directly give the Final Answer.
-- Be concise in your thoughts.
-- Maximum ${MAX_STEPS} tool calls allowed.`;
-
-/**
- * Parse the LLM response to extract Thought, Action, Action Input, or Final Answer.
- */
-function parseLLMResponse(response: string): AgentStep {
-  const step: AgentStep = { thought: "" };
-
-  // Extract Thought
-  const thoughtMatch = response.match(/Thought:\s*(.*?)(?=\n(?:Action:|Final Answer:)|$)/s);
-  if (thoughtMatch) {
-    step.thought = thoughtMatch[1].trim();
-  }
-
-  // Check for Final Answer
-  const finalMatch = response.match(/Final Answer:\s*(.*?)$/s);
-  if (finalMatch) {
-    step.finalAnswer = finalMatch[1].trim();
-    return step;
-  }
-
-  // Extract Action
-  const actionMatch = response.match(/Action:\s*(\S+)/);
-  if (actionMatch) {
-    step.action = actionMatch[1].trim();
-  }
-
-  // Extract Action Input (JSON)
-  const inputMatch = response.match(/Action Input:\s*(\{[\s\S]*?\})/);
-  if (inputMatch) {
-    try {
-      step.actionInput = JSON.parse(inputMatch[1]);
-    } catch {
-      step.actionInput = {};
-    }
-  }
-
-  return step;
-}
 
 /**
  * Convert MCP tool definitions to OpenAI function calling format.
@@ -159,16 +98,15 @@ function toOpenAITools(tools: MCPToolDef[]): LLMToolDef[] {
  *
  * Flow:
  *   1. Call LLM with messages + tool definitions
- *   2a. LLM returns tool_calls → execute tool → add result as tool role → repeat
- *   2b. LLM returns text → parse for Final Answer, or continue loop
- *   3. Max 8 steps, then force final answer
+ *   2a. LLM returns tool_calls → execute tool (via ToolManager) → add result as tool role → repeat
+ *   2b. LLM returns text → check for Final Answer, or continue loop
+ *   3. Max 5 steps, then force final answer
  */
 async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<AgentResult> {
   const steps: AgentStep[] = [];
 
   // Discover all tools including AnySearch for the LLM
   const availableTools = await buildToolList();
-  const availableToolMap = new Map(availableTools.map((t) => [t.name, t]));
   const openaiTools = toOpenAITools(availableTools);
   const toolNames = openaiTools.map((t) => t.function.name).join(", ");
 
@@ -195,7 +133,10 @@ Rules:
   const matchedSkill = matchSkill(task);
   if (matchedSkill) {
     console.error(`[Skill] Auto-applied: "${matchedSkill.name}" (used ${matchedSkill.useCount + 1}x)`);
-    messages.push({ role: "user", content: `Hint: A similar task was handled before. Approach: ${matchedSkill.steps.join(", ")}` });
+    messages.push({
+      role: "user",
+      content: `Hint: A similar task was handled before. Approach: ${matchedSkill.steps.join(", ")}`,
+    });
     useSkill(matchedSkill.id);
   }
 
@@ -226,14 +167,15 @@ Rules:
         content: llmResponse.content,
         toolCalls: llmResponse.toolCalls,
       });
-      if (decision === "stop") return {
-        success: true,
-        answer: llmResponse.content || "Task stopped by NextHook.",
-        steps,
-        totalSteps: steps.length,
-        llmPowered: true,
-        llmMode: mode,
-      };
+      if (decision === "stop")
+        return {
+          success: true,
+          answer: llmResponse.content || "Task stopped by NextHook.",
+          steps,
+          totalSteps: steps.length,
+          llmPowered: true,
+          llmMode: mode,
+        };
     }
 
     // === Handle tool_calls (function calling) ===
@@ -252,36 +194,15 @@ Rules:
         }
         step.actionInput = args;
 
-        // Execute the tool with retry
-        const tool = availableToolMap.get(tc.function.name) || getTool(tc.function.name);
-        if (tool) {
-          let lastError: string | null = null;
-          for (let attempt = 1; attempt <= TOOL_RETRY + 1; attempt++) {
-            try {
-              const result: ToolResult = await tool.handler(args);
-              const obsText = result.content
-                .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-                .join("\n");
-              step.observation = obsText;
-              messages.push({ role: "tool", tool_call_id: tc.id, content: obsText });
-              lastError = null;
-              break;
-            } catch (err) {
-              lastError = err instanceof Error ? err.message : String(err);
-              if (attempt <= TOOL_RETRY) {
-                await new Promise((r) => setTimeout(r, 1000 * attempt));
-              }
-            }
-          }
-          if (lastError) {
-            step.observation = `Error: ${lastError}`;
-            messages.push({ role: "tool", tool_call_id: tc.id, content: `Error: ${lastError}` });
-          }
-        } else {
-          const err = `Tool '${tc.function.name}' not found`;
-          step.observation = err;
-          messages.push({ role: "tool", tool_call_id: tc.id, content: err });
+        // Execute via ToolManager — gets timeout, concurrency, retry, guardrails
+        try {
+          const obsText = await toolManager.execute(tc.function.name, args);
+          step.observation = obsText;
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          step.observation = `Error: ${errMsg}`;
         }
+        messages.push({ role: "tool", tool_call_id: tc.id, content: step.observation });
 
         steps.push(step);
       }
@@ -298,7 +219,7 @@ Rules:
       steps.push({ thought: "Task completed.", finalAnswer: text });
       return {
         success: true,
-        answer: text,  // Full LLM response, not just the captured group
+        answer: text, // Full LLM response, not just the captured group
         steps,
         totalSteps: steps.length,
         llmPowered: true,
@@ -349,7 +270,6 @@ Rules:
  */
 async function runRuleBasedAgent(task: string): Promise<AgentResult> {
   const steps: AgentStep[] = [];
-  const lowerTask = task.toLowerCase();
   const observations: string[] = [];
 
   // Split compound tasks on " and then " or " then " (only for rule-based)
@@ -362,7 +282,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
   // Pattern 1: Math expression
   // Match expressions containing digits and math operators/functions only.
   // Known math function names (used for precise expression extraction below).
-  const MATH_FN = '(?:sqrt|sin|cos|tan|asin|acos|atan|log|ln|abs|exp|floor|ceil|round|pi|e)';
+  const MATH_FN = "(?:sqrt|sin|cos|tan|asin|acos|atan|log|ln|abs|exp|floor|ceil|round|pi|e)";
 
   /**
    * Strip trailing non-math content from an extracted expression.
@@ -370,17 +290,14 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
    * becomes "2^10". Also strips natural-language suffixes like "and convert to...".
    */
   function cleanMathExpr(raw: string): string {
-    const m = raw.match(new RegExp(
-      `^(?:${MATH_FN}\\s*)?[\\d\\s+\\-*/().^]+(?:\\s*(?:${MATH_FN})\\s*[\\d\\s+\\-*/().^]*)*`,
-      'i'
-    ));
+    const m = raw.match(
+      new RegExp(`^(?:${MATH_FN}\\s*)?[\\d\\s+\\-*/().^]+(?:\\s*(?:${MATH_FN})\\s*[\\d\\s+\\-*/().^]*)*`, "i")
+    );
     return m ? m[0].trim() : raw.trim();
   }
 
-  const mathExprRegex =
-    /(?:calculate|compute|evaluate|solve)\s+([\d\s+\-*/().^a-z_]+)/i;
-  const mathOperatorRegex =
-    /(\(?\s*[\d]+\s*[+\-*/^]+\s*[\d\s+\-*/().^a-z_]+)/;
+  const mathExprRegex = /(?:calculate|compute|evaluate|solve)\s+([\d\s+\-*/().^a-z_]+)/i;
+  const mathOperatorRegex = /(\(?\s*[\d]+\s*[+\-*/^]+\s*[\d\s+\-*/().^a-z_]+)/;
 
   for (const subTask of subTasks) {
     let expr: string | null = null;
@@ -407,7 +324,11 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
       }
     }
 
-    if (expr && /[\d]/.test(expr) && /[+\-*/^]|sqrt|sin|cos|tan|log|ln|abs|exp|floor|ceil|round|pi|\be\b/.test(expr)) {
+    if (
+      expr &&
+      /[\d]/.test(expr) &&
+      /[+\-*/^]|sqrt|sin|cos|tan|log|ln|abs|exp|floor|ceil|round|pi|\be\b/.test(expr)
+    ) {
       const step: AgentStep = {
         thought: `Detected a math expression: ${expr}`,
         action: "calculator",
@@ -415,9 +336,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
       };
       const tool = getTool("calculator")!;
       const result = await tool.handler(step.actionInput || {});
-      const obs = result.content
-        .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-        .join("\n");
+      const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
       step.observation = obs;
       steps.push(step);
       observations.push(obs);
@@ -426,9 +345,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
 
   // Pattern 2: Unit conversion — check all subtasks
   for (const subTask of subTasks) {
-    const convertMatch = subTask.match(
-      /convert\s+([\d.]+)\s*(\w+)\s+(?:to|into)\s*(\w+)/i
-    );
+    const convertMatch = subTask.match(/convert\s+([\d.]+)\s*(\w+)\s+(?:to|into)\s*(\w+)/i);
     if (convertMatch) {
       const [, valueStr, from, to] = convertMatch;
       const step: AgentStep = {
@@ -442,9 +359,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
       };
       const tool = getTool("unit_convert")!;
       const result = await tool.handler(step.actionInput || {});
-      const obs = result.content
-        .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-        .join("\n");
+      const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
       step.observation = obs;
       steps.push(step);
       observations.push(obs);
@@ -464,9 +379,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     };
     const tool = getTool("datetime_info")!;
     const result = await tool.handler(step.actionInput || {});
-    const obs = result.content
-      .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-      .join("\n");
+    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
     observations.push(obs);
@@ -485,9 +398,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     };
     const tool = getTool("random_gen")!;
     const result = await tool.handler(step.actionInput || {});
-    const obs = result.content
-      .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-      .join("\n");
+    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
     observations.push(obs);
@@ -502,16 +413,16 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     };
     const tool = getTool("random_gen")!;
     const result = await tool.handler(step.actionInput || {});
-    const obs = result.content
-      .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-      .join("\n");
+    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
     observations.push(obs);
   }
 
   // Pattern 6: Text analysis
-  const analyzeMatch = task.match(/(?:analyze|stats?|statistics)\s+(?:of|for|this)?\s*:?\s*["']?(.+?)["']?$/i);
+  const analyzeMatch = task.match(
+    /(?:analyze|stats?|statistics)\s+(?:of|for|this)?\s*:?\s*["']?(.+?)["']?$/i
+  );
   if (analyzeMatch && analyzeMatch[1]) {
     const text = analyzeMatch[1].trim();
     const step: AgentStep = {
@@ -521,9 +432,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     };
     const tool = getTool("text_stats")!;
     const result = await tool.handler(step.actionInput || {});
-    const obs = result.content
-      .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-      .join("\n");
+    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
     observations.push(obs);
@@ -542,9 +451,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     };
     const tool = getTool("datetime_info")!;
     const result = await tool.handler(step.actionInput || {});
-    const obs = result.content
-      .map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json)))
-      .join("\n");
+    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
     observations.push(obs);
@@ -560,7 +467,9 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
       if (names.length > 0) {
         searchHint = `\n\nExtended tools available: ${names.join(", ")}`;
       }
-    } catch { /* ignore — search tools just won't be mentioned */ }
+    } catch {
+      /* ignore — search tools just won't be mentioned */
+    }
 
     return {
       success: false,
@@ -599,17 +508,14 @@ export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentR
   const mode = forceMode === "rule" ? "none" : getLLMMode();
 
   if (mode === "sampling") {
-    // 1) Try MCP sampling first
     try {
       return await runLLMAgent(task, "sampling");
     } catch (samplingErr) {
-      // 2) Sampling failed — try Direct HTTP if env vars are configured
       const httpConfig = getLLMConfig();
       if (httpConfig) {
         try {
           return await runLLMAgent(task, "http");
         } catch (httpErr) {
-          // 3) Direct HTTP also failed — fall back to rule-based
           const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
           const hMsg = httpErr instanceof Error ? httpErr.message : String(httpErr);
           const result = await runRuleBasedAgent(task);
@@ -617,7 +523,6 @@ export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentR
           return result;
         }
       }
-      // No Direct HTTP config — fall back to rule-based
       const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
       const result = await runRuleBasedAgent(task);
       result.answer = `[Sampling error: ${sMsg}] — falling back to rule-based mode.\n\n${result.answer}`;
@@ -626,7 +531,6 @@ export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentR
   }
 
   if (mode === "http") {
-    // Direct HTTP only (no sampling available)
     try {
       return await runLLMAgent(task, "http");
     } catch (err) {
@@ -637,6 +541,5 @@ export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentR
     }
   }
 
-  // Rule-based only (no LLM available)
   return await runRuleBasedAgent(task);
 }

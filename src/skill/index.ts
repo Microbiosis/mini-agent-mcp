@@ -24,6 +24,8 @@ export interface Skill {
   useCount: number;
   createdAt: number;
   lastUsedAt?: number;
+  /** When this skill's content (description/steps/tags) was last updated */
+  lastUpdatedAt?: number;
 }
 
 const SKILL_DIR = resolve(process.cwd(), ".skills");
@@ -36,7 +38,11 @@ function ensureDir(): void {
 function loadAll(): Skill[] {
   ensureDir();
   if (!existsSync(SKILL_FILE)) return [];
-  try { return JSON.parse(readFileSync(SKILL_FILE, "utf8")); } catch { return []; }
+  try {
+    return JSON.parse(readFileSync(SKILL_FILE, "utf8"));
+  } catch {
+    return [];
+  }
 }
 
 function saveAll(skills: Skill[]): void {
@@ -53,24 +59,52 @@ export function extractSkill(
   tags: string[]
 ): Skill {
   const skills = loadAll();
-  const existing = skills.findIndex((s) => s.name === name);
+  const existingIdx = skills.findIndex((s) => s.name === name);
+  const now = Date.now();
+
+  if (existingIdx >= 0) {
+    const existing = skills[existingIdx];
+    // Compare: if the existing record has a newer lastUpdatedAt (e.g. a
+    // concurrent process updated it after our loadAll), keep it.
+    // Otherwise overwrite with the new content but preserve useCount.
+    if (existing.lastUpdatedAt && existing.lastUpdatedAt > now) {
+      // Existing is newer — only refresh lastUpdatedAt to mark a re-touch
+      existing.lastUpdatedAt = now;
+      saveAll(skills);
+      console.error(`[Skill] Refreshed: "${name}" (kept newer version)`);
+      return existing;
+    }
+    // Current call is newer (or no lastUpdatedAt yet) — overwrite content
+    skills[existingIdx] = {
+      id: existing.id,
+      name,
+      description,
+      exampleTask,
+      steps,
+      tags,
+      useCount: existing.useCount,
+      createdAt: existing.createdAt,
+      lastUsedAt: existing.lastUsedAt,
+      lastUpdatedAt: now,
+    };
+    saveAll(skills);
+    console.error(`[Skill] Updated: "${name}" (${tags.join(", ")})`);
+    return skills[existingIdx];
+  }
+
+  // New skill — insert
   const skill: Skill = {
-    id: `skill_${Date.now()}`,
+    id: `skill_${now}`,
     name,
     description,
     exampleTask,
     steps,
     tags,
     useCount: 0,
-    createdAt: Date.now(),
+    createdAt: now,
+    lastUpdatedAt: now,
   };
-
-  if (existing >= 0) {
-    skills[existing] = { ...skills[existing], ...skill, useCount: skills[existing].useCount };
-  } else {
-    skills.push(skill);
-  }
-
+  skills.push(skill);
   saveAll(skills);
   console.error(`[Skill] Extracted: "${name}" (${tags.join(", ")})`);
   return skill;

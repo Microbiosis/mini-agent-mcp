@@ -23,7 +23,8 @@ export const datetimeTool: ToolDefinition = {
       },
       timezone: {
         type: "string",
-        description: "Timezone for 'now' operation, e.g. 'Asia/Shanghai', 'America/New_York'. Defaults to UTC.",
+        description:
+          "Timezone for 'now' operation, e.g. 'Asia/Shanghai', 'America/New_York'. Defaults to UTC.",
       },
       date: {
         type: "string",
@@ -60,8 +61,7 @@ export const datetimeTool: ToolDefinition = {
             timeZoneName: "short",
           });
           const parts = formatter.formatToParts(now);
-          const get = (type: string) =>
-            parts.find((p) => p.type === type)?.value || "";
+          const get = (type: string) => parts.find((p) => p.type === type)?.value || "";
           const tzName = parts.find((p) => p.type === "timeZoneName")?.value || tz;
 
           return textResult(
@@ -71,10 +71,7 @@ export const datetimeTool: ToolDefinition = {
               `  Unix timestamp: ${Math.floor(now.getTime() / 1000)}`
           );
         } catch {
-          return textResult(
-            `Current date/time (UTC):\n  ${new Date().toISOString()}`,
-            false
-          );
+          return textResult(`Current date/time (UTC):\n  ${new Date().toISOString()}`, false);
         }
       }
 
@@ -89,7 +86,20 @@ export const datetimeTool: ToolDefinition = {
           return textResult(`Error: invalid date '${dateStr}'`, true);
         }
         const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const monthNames = [
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December",
+        ];
 
         const pad = (n: number) => String(n).padStart(2, "0");
         const result = fmt

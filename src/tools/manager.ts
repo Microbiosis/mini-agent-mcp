@@ -8,8 +8,6 @@
  *   - Call history tracking
  */
 
-import type { ToolResult } from "./types.js";
-
 export interface ToolEntry {
   name: string;
   description: string;
@@ -31,7 +29,10 @@ export interface ToolCallRecord {
 /** Max tool retries on transient error (env TOOL_RETRY_COUNT, default 2) */
 const TOOL_RETRY_COUNT = (() => {
   const v = process.env.TOOL_RETRY_COUNT;
-  if (v) { const n = parseInt(v, 10); if (!isNaN(n) && n >= 0 && n <= 5) return n; }
+  if (v) {
+    const n = parseInt(v, 10);
+    if (!isNaN(n) && n >= 0 && n <= 5) return n;
+  }
   return 2;
 })();
 
@@ -39,8 +40,16 @@ const TOOL_RETRY_COUNT = (() => {
 function classifyToolError(err: unknown): "hard" | "transient" {
   const m = err instanceof Error ? err.message : String(err);
   const l = m.toLowerCase();
-  if (l.includes("401") || l.includes("403") || l.includes("refused") || l.includes("dns") || l.includes("enotfound")) return "hard";
-  if (l.includes("timeout") || l.includes("429") || l.includes("5xx") || l.includes("econnreset")) return "transient";
+  if (
+    l.includes("401") ||
+    l.includes("403") ||
+    l.includes("refused") ||
+    l.includes("dns") ||
+    l.includes("enotfound")
+  )
+    return "hard";
+  if (l.includes("timeout") || l.includes("429") || l.includes("5xx") || l.includes("econnreset"))
+    return "transient";
   return "hard";
 }
 
@@ -127,7 +136,9 @@ class ToolManagerImpl {
             break;
           }
           const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
-          console.error(`[ToolManager] Retry ${attempt}/${TOOL_RETRY_COUNT} for '${tool.name}' after ${delay}ms`);
+          console.error(
+            `[ToolManager] Retry ${attempt}/${TOOL_RETRY_COUNT} for '${tool.name}' after ${delay}ms`
+          );
           await new Promise((r) => setTimeout(r, delay));
         }
       }
@@ -136,7 +147,12 @@ class ToolManagerImpl {
     }
 
     this.callHistory.push({
-      toolName: name, args, result: result!, durationMs: Date.now() - start, error, timestamp: Date.now(),
+      toolName: name,
+      args,
+      result: result!,
+      durationMs: Date.now() - start,
+      error,
+      timestamp: Date.now(),
     });
 
     return result!;

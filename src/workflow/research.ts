@@ -101,9 +101,7 @@ Then summarize what you found in 3-5 bullet points. Be factual and cite specific
   }
 
   // Step 3: Synthesize — generate final report
-  const findingsText = findings
-    .map((f) => `## ${f.question}\n${f.findings}`)
-    .join("\n\n");
+  const findingsText = findings.map((f) => `## ${f.question}\n${f.findings}`).join("\n\n");
 
   const reportResult = await runAgent(
     `You are a research report writer. Synthesize the following research findings into a comprehensive, well-structured report.

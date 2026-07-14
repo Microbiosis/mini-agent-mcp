@@ -9,7 +9,7 @@ import type { ToolDefinition } from "../tools/types.js";
 import { textResult } from "../tools/types.js";
 import { runAgent } from "./react.js";
 import { isLMAvailable } from "./llm.js";
-import { allTools, buildToolList } from "../tools/registry.js";
+import { allTools } from "../tools/registry.js";
 
 // Collect built-in tool names once for the description
 const builtinToolNames = allTools.map((t) => t.name).join(", ");
@@ -58,7 +58,9 @@ export const agentTool: ToolDefinition = {
     lines.push("=== Agent Result ===");
     lines.push(`Task: ${task}`);
     const modeLabel = result.llmPowered
-      ? (result.llmMode === "sampling" ? "LLM-powered (MCP sampling)" : "LLM-powered (direct HTTP)")
+      ? result.llmMode === "sampling"
+        ? "LLM-powered (MCP sampling)"
+        : "LLM-powered (direct HTTP)"
       : "Rule-based";
     lines.push(`Mode: ${modeLabel}`);
     lines.push(`Steps: ${result.totalSteps}`);

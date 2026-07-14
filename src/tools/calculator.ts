@@ -3,7 +3,7 @@
  * Supports +, -, *, /, ^, parentheses, sqrt(), abs(), sin(), cos(), tan(), log(), ln(), pi, e.
  */
 
-import type { ToolDefinition, ToolResult } from "./types.js";
+import type { ToolDefinition } from "./types.js";
 import { textResult } from "./types.js";
 
 /** Safe math expression evaluator — no eval() used */
