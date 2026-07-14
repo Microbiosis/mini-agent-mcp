@@ -1,0 +1,6 @@
+dist
+node_modules
+.memory
+.skills
+*.md
+package-lock.json

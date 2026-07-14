@@ -19,6 +19,10 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "node dist/index.js --test",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write \"src/**/*.{ts,json}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,json}\"",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -53,6 +57,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "@typescript-eslint/eslint-plugin": "^8.64.0",
+    "@typescript-eslint/parser": "^8.64.0",
+    "eslint": "^10.7.0",
+    "prettier": "^3.9.5",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.64.0"
   }
 }
