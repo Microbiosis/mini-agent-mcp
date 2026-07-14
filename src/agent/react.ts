@@ -102,7 +102,11 @@ function toOpenAITools(tools: MCPToolDef[]): LLMToolDef[] {
  *   2b. LLM returns text → check for Final Answer, or continue loop
  *   3. Max 5 steps, then force final answer
  */
-async function runLLMAgent(task: string, mode: "sampling" | "http"): Promise<AgentResult> {
+async function runLLMAgent(
+  task: string,
+  mode: "sampling" | "http",
+  onStep?: (step: AgentStep) => void | Promise<void>
+): Promise<AgentResult> {
   const steps: AgentStep[] = [];
 
   // Discover all tools including AnySearch for the LLM
@@ -205,6 +209,7 @@ Rules:
         messages.push({ role: "tool", tool_call_id: tc.id, content: step.observation });
 
         steps.push(step);
+        await onStep?.(step);
       }
       continue; // Go back to LLM with tool results
     }
@@ -216,7 +221,9 @@ Rules:
     // Check for Final Answer — return full content, not just parsed text
     const finalMatch = text.match(/Final Answer:\s*(.*?)$/s);
     if (finalMatch) {
-      steps.push({ thought: "Task completed.", finalAnswer: text });
+      const finalStep: AgentStep = { thought: "Task completed.", finalAnswer: text };
+      steps.push(finalStep);
+      await onStep?.(finalStep);
       return {
         success: true,
         answer: text, // Full LLM response, not just the captured group
@@ -268,7 +275,10 @@ Rules:
  * Rule-based fallback agent — used when no LLM API key is configured.
  * Pattern-matches the task and calls appropriate tools.
  */
-async function runRuleBasedAgent(task: string): Promise<AgentResult> {
+async function runRuleBasedAgent(
+  task: string,
+  onStep?: (step: AgentStep) => void | Promise<void>
+): Promise<AgentResult> {
   const steps: AgentStep[] = [];
   const observations: string[] = [];
 
@@ -339,6 +349,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
       const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
       step.observation = obs;
       steps.push(step);
+      await onStep?.(step);
       observations.push(obs);
     }
   }
@@ -362,6 +373,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
       const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
       step.observation = obs;
       steps.push(step);
+      await onStep?.(step);
       observations.push(obs);
     }
   }
@@ -382,6 +394,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
+    await onStep?.(step);
     observations.push(obs);
   }
 
@@ -401,6 +414,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
+    await onStep?.(step);
     observations.push(obs);
   }
 
@@ -416,6 +430,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
+    await onStep?.(step);
     observations.push(obs);
   }
 
@@ -435,6 +450,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
+    await onStep?.(step);
     observations.push(obs);
   }
 
@@ -454,6 +470,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
     step.observation = obs;
     steps.push(step);
+    await onStep?.(step);
     observations.push(obs);
   }
 
@@ -490,6 +507,7 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
     finalAnswer: observations.join("\n\n---\n\n"),
   };
   steps.push(finalStep);
+  await onStep?.(finalStep);
 
   return {
     success: true,
@@ -504,27 +522,31 @@ async function runRuleBasedAgent(task: string): Promise<AgentResult> {
  * Main entry point — runs the agent on a task.
  * Priority: MCP sampling (client model) > Direct HTTP > Rule-based
  */
-export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentResult> {
+export async function runAgent(
+  task: string,
+  forceMode?: "rule",
+  onStep?: (step: AgentStep) => void | Promise<void>
+): Promise<AgentResult> {
   const mode = forceMode === "rule" ? "none" : getLLMMode();
 
   if (mode === "sampling") {
     try {
-      return await runLLMAgent(task, "sampling");
+      return await runLLMAgent(task, "sampling", onStep);
     } catch (samplingErr) {
       const httpConfig = getLLMConfig();
       if (httpConfig) {
         try {
-          return await runLLMAgent(task, "http");
+          return await runLLMAgent(task, "http", onStep);
         } catch (httpErr) {
           const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
           const hMsg = httpErr instanceof Error ? httpErr.message : String(httpErr);
-          const result = await runRuleBasedAgent(task);
+          const result = await runRuleBasedAgent(task, onStep);
           result.answer = `[LLM errors: sampling (${sMsg}), http (${hMsg})] — falling back to rule-based mode.\n\n${result.answer}`;
           return result;
         }
       }
       const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
-      const result = await runRuleBasedAgent(task);
+      const result = await runRuleBasedAgent(task, onStep);
       result.answer = `[Sampling error: ${sMsg}] — falling back to rule-based mode.\n\n${result.answer}`;
       return result;
     }
@@ -532,14 +554,14 @@ export async function runAgent(task: string, forceMode?: "rule"): Promise<AgentR
 
   if (mode === "http") {
     try {
-      return await runLLMAgent(task, "http");
+      return await runLLMAgent(task, "http", onStep);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const result = await runRuleBasedAgent(task);
+      const result = await runRuleBasedAgent(task, onStep);
       result.answer = `[LLM error: ${msg}] — falling back to rule-based mode.\n\n${result.answer}`;
       return result;
     }
   }
 
-  return await runRuleBasedAgent(task);
+  return await runRuleBasedAgent(task, onStep);
 }

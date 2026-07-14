@@ -79,26 +79,6 @@ function registerInternalTool<T extends z.ZodRawShape>(
   });
 }
 
-// ─── Register an MCP-visible tool (ToolManager + FastMCP) ─────────────────
-function registerFastMCPTool<T extends z.ZodRawShape>(
-  name: string,
-  description: string,
-  params: z.ZodObject<T>,
-  // Handler args are the inferred parsed shape of `params` (TS infers T).
-  handler: (args: z.infer<z.ZodObject<T>>) => Promise<string>,
-  timeoutMs = 120000
-) {
-  registerInternalTool(name, description, params, handler, timeoutMs, true);
-  // Then register with FastMCP server (so MCP host can discover via tools/list)
-  server.addTool({
-    name,
-    description,
-    parameters: params,
-    timeoutMs,
-    execute: (args) => toolManager.execute(name, args as Record<string, unknown>),
-  });
-}
-
 // Built-in tools (30s timeout — internal-only; the embedded Agent uses them
 // to carry out tasks delegated via run_agent. Not exposed to MCP clients.)
 for (const [, def] of Object.entries({
@@ -112,18 +92,51 @@ for (const [, def] of Object.entries({
   registerInternalTool(def.name, def.description, def.inputSchema, def.handler, 30000);
 }
 
-// run_agent
-registerFastMCPTool(
-  "run_agent",
-  "Run a ReAct agent that can autonomously use all available tools to complete a task. Supports multi-step tasks with LLM or rule-based mode.",
-  z.object({
+// run_agent — direct addTool (bypasses ToolManager) so the handler can
+// receive the FastMCP context and stream per-step progress via
+// context.streamContent. Long-running tasks (e.g. multi-step LLM
+// reasoning) no longer time out silently — each step is emitted as soon
+// as the agent finishes it.
+server.addTool({
+  name: "run_agent",
+  description:
+    "Run a ReAct agent that can autonomously use all available tools to complete a task. Supports multi-step tasks with LLM or rule-based mode.",
+  parameters: z.object({
     task: z.string().describe("The task for the agent to complete"),
     mode: z.enum(["auto", "rule"]).optional().describe("Force mode: 'rule' for no-LLM mode"),
   }),
-  async (args) => {
-    const result = await runAgent(args.task, args.mode === "rule" ? "rule" : undefined);
+  // streamingHint: tool produces incremental output (one content block
+  // per agent step). MCP clients can render progress without waiting
+  // for the final answer.
+  annotations: { streamingHint: true },
+  // 10 minutes — rule-mode is fast, but LLM-mode may take several
+  // minutes for complex multi-step tasks. Previously 2 minutes was too
+  // tight and caused silent timeouts on legitimate long tasks.
+  timeoutMs: 600000,
+  execute: async (args, context) => {
+    const a = args as { task: string; mode?: "auto" | "rule" };
+
+    // Bridge: every agent step is pushed to the client as a text content
+    // block. This lets the client see progress before run_agent finishes.
+    const onStep = async (step: {
+      thought?: string;
+      action?: string;
+      observation?: string;
+      finalAnswer?: string;
+    }): Promise<void> => {
+      if (!context) return;
+      const parts: string[] = [];
+      if (step.thought) parts.push(`Thought: ${step.thought}`);
+      if (step.action) parts.push(`Action: ${step.action}`);
+      if (step.observation) parts.push(`Observation: ${step.observation}`);
+      if (step.finalAnswer) parts.push(`Final Answer: ${step.finalAnswer}`);
+      if (parts.length === 0) return;
+      await context.streamContent({ type: "text", text: parts.join("\n") });
+    };
+
+    const result = await runAgent(a.task, a.mode === "rule" ? "rule" : undefined, onStep);
     const lines = [
-      `Task: ${args.task}`,
+      `Task: ${a.task}`,
       `Mode: ${result.llmPowered ? (result.llmMode === "sampling" ? "LLM (sampling)" : "LLM (HTTP)") : "Rule-based"}`,
       `Steps: ${result.totalSteps}`,
       "",
@@ -142,8 +155,8 @@ registerFastMCPTool(
     }
     lines.push("--- Final Answer ---", result.answer);
     return lines.join("\n");
-  }
-);
+  },
+});
 
 // ─── Test mode ────────────────────────────────────────────────────────────
 if (process.argv.includes("--test")) {
