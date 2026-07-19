@@ -3,10 +3,15 @@
  *
  * Uses a JSON file for storage.
  * Inspired by MemSense / ArkMem patterns.
+ *
+ * File location: `${MINI_AGENT_DATA_DIR}/memories/memories.json`
+ * (default `.mini-agent/memories/memories.json` under the package directory).
+ * Set `MINI_AGENT_DATA_DIR` to override.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 interface MemoryEntry {
   id: string;
@@ -17,7 +22,12 @@ interface MemoryEntry {
   accessCount: number;
 }
 
-const MEMORY_DIR = resolve(process.cwd(), ".memory");
+const __pkgdir = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DATA_DIR = resolve(__pkgdir, "..", "..", ".mini-agent");
+const DATA_ROOT = process.env.MINI_AGENT_DATA_DIR
+  ? resolve(process.env.MINI_AGENT_DATA_DIR)
+  : DEFAULT_DATA_DIR;
+const MEMORY_DIR = resolve(DATA_ROOT, "memories");
 const MEMORY_FILE = resolve(MEMORY_DIR, "memories.json");
 
 function ensureDir(): void {
@@ -36,7 +46,11 @@ function loadAll(): MemoryEntry[] {
 
 function saveAll(entries: MemoryEntry[]): void {
   ensureDir();
-  writeFileSync(MEMORY_FILE, JSON.stringify(entries, null, 2), "utf8");
+  // Atomic write: temp file in the same dir, then rename. Prevents
+  // half-written JSON when a concurrent process or signal interrupts us.
+  const tmp = `${MEMORY_FILE}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(entries, null, 2), "utf8");
+  renameSync(tmp, MEMORY_FILE);
 }
 
 /** Remember a piece of information */

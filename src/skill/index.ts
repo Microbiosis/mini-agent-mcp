@@ -5,10 +5,14 @@
  *   1. Extract the task pattern as a reusable "skill"
  *   2. Store skills for future use
  *   3. Match new tasks to known skills and apply them
+ *
+ * File location: `${MINI_AGENT_DATA_DIR}/skills/skills.json` (override with
+ * `MINI_AGENT_DATA_DIR` env var).
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface Skill {
   id: string;
@@ -28,7 +32,12 @@ export interface Skill {
   lastUpdatedAt?: number;
 }
 
-const SKILL_DIR = resolve(process.cwd(), ".skills");
+const __pkgdir = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DATA_DIR = resolve(__pkgdir, "..", "..", ".mini-agent");
+const DATA_ROOT = process.env.MINI_AGENT_DATA_DIR
+  ? resolve(process.env.MINI_AGENT_DATA_DIR)
+  : DEFAULT_DATA_DIR;
+const SKILL_DIR = resolve(DATA_ROOT, "skills");
 const SKILL_FILE = resolve(SKILL_DIR, "skills.json");
 
 function ensureDir(): void {
@@ -47,7 +56,9 @@ function loadAll(): Skill[] {
 
 function saveAll(skills: Skill[]): void {
   ensureDir();
-  writeFileSync(SKILL_FILE, JSON.stringify(skills, null, 2), "utf8");
+  const tmp = `${SKILL_FILE}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(skills, null, 2), "utf8");
+  renameSync(tmp, SKILL_FILE);
 }
 
 /** Extract a skill from a completed task */

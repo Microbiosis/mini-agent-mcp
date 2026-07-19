@@ -1,8 +1,11 @@
-// Test memory + skill + tool manager (no LLM needed)
-process.env.LLM_API_KEY = "REDACTED-LONGCHAT-API-KEY-ROTATE-IN-VENDOR-CONSOLE";
-const { remember, recall, getMemoryStats, clearMemories } = await import("../dist/memory/index.js");
-const { extractSkill, matchSkill, listSkills, getSkillStats } = await import("../dist/skill/index.js");
-const { toolManager } = await import("../dist/tools/manager.js");
+// Test memory + skill + tool manager. **No LLM required.**
+//
+// Persisted under $MINI_AGENT_DATA_DIR (defaulting to the package's
+// .mini-agent/) so it never writes into the host working directory.
+
+import { remember, recall, getMemoryStats } from "../dist/memory/index.js";
+import { extractSkill, matchSkill, listSkills, getSkillStats } from "../dist/skill/index.js";
+import { toolManager } from "../dist/tools/manager.js";
 
 console.log("=== Memory System ===");
 console.log("\n[before] stats:", JSON.stringify(getMemoryStats()));
@@ -17,8 +20,11 @@ remember("conversation", "本地 MCP server 有 12 个注册工具", [t2]);
 
 console.log("\n[after] stats:", JSON.stringify(getMemoryStats()));
 
-console.log("\n[recall t1]", recall([t1]).map(m => `[${m.type}] ${m.content.slice(0,80)}`).join("\n           "));
-console.log("\n[recall t2 (limit 2)]", recall([t2], 2).map(m => `[${m.type}] ${m.content.slice(0,80)}`).join("\n                       "));
+console.log("\n[recall t1]", recall([t1]).map((m) => `[${m.type}] ${m.content.slice(0, 80)}`).join("\n           "));
+console.log(
+  "\n[recall t2 (limit 2)]",
+  recall([t2], 2).map((m) => `[${m.type}] ${m.content.slice(0, 80)}`).join("\n                       ")
+);
 console.log("\n[recall missing]", recall(["never-existed"]));
 
 console.log("\n=== Skill System ===");
@@ -50,6 +56,4 @@ for (const s of listSkills()) console.log(`  - ${s.name} (used ${s.useCount}x): 
 
 console.log("\n=== ToolManager stats ===");
 console.log("Total tools:", toolManager.size);
-console.log("Names:", toolManager.list().map(t => t.name).join(", "));
-
-process.exit(0);
+console.log("Names:", toolManager.list().map((t) => t.name).join(", "));

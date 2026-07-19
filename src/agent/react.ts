@@ -6,7 +6,7 @@
  *   - NextHook: runs after each LLM call, can validate output
  */
 
-import { allTools, getTool, buildToolList } from "../tools/registry.js";
+import { allTools, buildToolList } from "../tools/registry.js";
 import type { ToolDefinition as MCPToolDef } from "../tools/types.js";
 import {
   callLLM,
@@ -105,12 +105,17 @@ function toOpenAITools(tools: MCPToolDef[]): LLMToolDef[] {
 async function runLLMAgent(
   task: string,
   mode: "sampling" | "http",
-  onStep?: (step: AgentStep) => void | Promise<void>
+  onStep?: (step: AgentStep) => void | Promise<void>,
+  options?: { toolAllowlist?: string[] }
 ): Promise<AgentResult> {
   const steps: AgentStep[] = [];
 
   // Discover all tools including AnySearch for the LLM
-  const availableTools = await buildToolList();
+  let availableTools = await buildToolList();
+  if (options?.toolAllowlist) {
+    const set = new Set(options.toolAllowlist);
+    availableTools = availableTools.filter((t) => set.has(t.name));
+  }
   const openaiTools = toOpenAITools(availableTools);
   const toolNames = openaiTools.map((t) => t.function.name).join(", ");
 
@@ -184,6 +189,14 @@ Rules:
 
     // === Handle tool_calls (function calling) ===
     if (llmResponse.finishReason === "tool_calls" && llmResponse.toolCalls) {
+      // OpenAI / compatible APIs require a single assistant message carrying
+      // every tool_call *before* the corresponding role:"tool" results.
+      // Without that, the next call is rejected as malformed conversation.
+      messages.push({
+        role: "assistant",
+        content: llmResponse.content ?? "",
+        tool_calls: llmResponse.toolCalls,
+      });
       for (const tc of llmResponse.toolCalls) {
         const step: AgentStep = {
           thought: `Calling tool: ${tc.function.name}`,
@@ -199,8 +212,12 @@ Rules:
         step.actionInput = args;
 
         // Execute via ToolManager — gets timeout, concurrency, retry, guardrails
+        let obsText: string;
         try {
-          const obsText = await toolManager.execute(tc.function.name, args);
+          obsText = await toolManager.execute(tc.function.name, args);
+          // ToolManager's execute returns a string; "Error: ..." prefixes
+          // are the canonical signal of a failure that should be visible to
+          // the LLM. Surface them as a regular observation.
           step.observation = obsText;
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -251,9 +268,15 @@ Rules:
   const finalResponse = await callLLM(messages, openaiTools);
 
   if (finalResponse.error) {
+    const failureStep: AgentStep = {
+      thought: "Max steps reached; forced final call failed.",
+      finalAnswer: `Error: ${finalResponse.errorMessage || "forced final call failed"}`,
+    };
+    steps.push(failureStep);
+    await onStep?.(failureStep);
     return {
-      success: true,
-      answer: "Max steps reached.",
+      success: false,
+      answer: failureStep.finalAnswer!,
       steps,
       totalSteps: steps.length,
       llmPowered: true,
@@ -261,9 +284,16 @@ Rules:
     };
   }
 
+  const finalText = finalResponse.content || "Task completed.";
+  const completionStep: AgentStep = {
+    thought: "Max steps reached; produced final summary.",
+    finalAnswer: finalText,
+  };
+  steps.push(completionStep);
+  await onStep?.(completionStep);
   return {
     success: true,
-    answer: finalResponse.content || "Task completed.",
+    answer: finalText,
     steps,
     totalSteps: steps.length,
     llmPowered: true,
@@ -277,10 +307,21 @@ Rules:
  */
 async function runRuleBasedAgent(
   task: string,
-  onStep?: (step: AgentStep) => void | Promise<void>
+  onStep?: (step: AgentStep) => void | Promise<void>,
+  toolAllowlist?: string[]
 ): Promise<AgentResult> {
   const steps: AgentStep[] = [];
   const observations: string[] = [];
+  const allowed = new Set(toolAllowlist && toolAllowlist.length > 0 ? toolAllowlist : allTools.map((t) => t.name));
+
+  // Helper to invoke tools through ToolManager so timeouts, retries, history,
+  // and concurrency limits apply uniformly across LLM and rule-mode paths.
+  async function runViaManager(name: string, args: Record<string, unknown>): Promise<string> {
+    if (!allowed.has(name)) {
+      throw new Error(`Tool '${name}' is not in the current allowlist`);
+    }
+    return await toolManager.execute(name, args);
+  }
 
   // Split compound tasks on " and then " or " then " (only for rule-based)
   // Note: intentionally NOT splitting on bare "and" to avoid breaking math like "5 and 3"
@@ -344,13 +385,14 @@ async function runRuleBasedAgent(
         action: "calculator",
         actionInput: { expression: expr },
       };
-      const tool = getTool("calculator")!;
-      const result = await tool.handler(step.actionInput || {});
-      const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-      step.observation = obs;
+      try {
+        step.observation = await runViaManager("calculator", step.actionInput || {});
+      } catch (err) {
+        step.observation = `Error: ${(err as Error).message}`;
+      }
+      observations.push(step.observation || "");
       steps.push(step);
       await onStep?.(step);
-      observations.push(obs);
     }
   }
 
@@ -368,13 +410,14 @@ async function runRuleBasedAgent(
           to: to.toLowerCase(),
         },
       };
-      const tool = getTool("unit_convert")!;
-      const result = await tool.handler(step.actionInput || {});
-      const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-      step.observation = obs;
+      try {
+        step.observation = await runViaManager("unit_convert", step.actionInput || {});
+      } catch (err) {
+        step.observation = `Error: ${(err as Error).message}`;
+      }
+      observations.push(step.observation || "");
       steps.push(step);
       await onStep?.(step);
-      observations.push(obs);
     }
   }
 
@@ -389,13 +432,14 @@ async function runRuleBasedAgent(
         timezone: tzMatch ? tzMatch[1] : "Asia/Shanghai",
       },
     };
-    const tool = getTool("datetime_info")!;
-    const result = await tool.handler(step.actionInput || {});
-    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-    step.observation = obs;
+    try {
+      step.observation = await runViaManager("datetime_info", step.actionInput || {});
+    } catch (err) {
+      step.observation = `Error: ${(err as Error).message}`;
+    }
+    observations.push(step.observation || "");
     steps.push(step);
     await onStep?.(step);
-    observations.push(obs);
   }
 
   // Pattern 4: Generate password
@@ -409,13 +453,14 @@ async function runRuleBasedAgent(
         length: lenMatch ? parseInt(lenMatch[1]) : 16,
       },
     };
-    const tool = getTool("random_gen")!;
-    const result = await tool.handler(step.actionInput || {});
-    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-    step.observation = obs;
+    try {
+      step.observation = await runViaManager("random_gen", step.actionInput || {});
+    } catch (err) {
+      step.observation = `Error: ${(err as Error).message}`;
+    }
+    observations.push(step.observation || "");
     steps.push(step);
     await onStep?.(step);
-    observations.push(obs);
   }
 
   // Pattern 5: UUID
@@ -425,13 +470,14 @@ async function runRuleBasedAgent(
       action: "random_gen",
       actionInput: { operation: "uuid" },
     };
-    const tool = getTool("random_gen")!;
-    const result = await tool.handler(step.actionInput || {});
-    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-    step.observation = obs;
+    try {
+      step.observation = await runViaManager("random_gen", step.actionInput || {});
+    } catch (err) {
+      step.observation = `Error: ${(err as Error).message}`;
+    }
+    observations.push(step.observation || "");
     steps.push(step);
     await onStep?.(step);
-    observations.push(obs);
   }
 
   // Pattern 6: Text analysis
@@ -445,13 +491,14 @@ async function runRuleBasedAgent(
       action: "text_stats",
       actionInput: { text },
     };
-    const tool = getTool("text_stats")!;
-    const result = await tool.handler(step.actionInput || {});
-    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-    step.observation = obs;
+    try {
+      step.observation = await runViaManager("text_stats", step.actionInput || {});
+    } catch (err) {
+      step.observation = `Error: ${(err as Error).message}`;
+    }
+    observations.push(step.observation || "");
     steps.push(step);
     await onStep?.(step);
-    observations.push(obs);
   }
 
   // Pattern 7: Date difference
@@ -465,13 +512,14 @@ async function runRuleBasedAgent(
       action: "datetime_info",
       actionInput: { operation: "diff", date: d1, date2: d2 },
     };
-    const tool = getTool("datetime_info")!;
-    const result = await tool.handler(step.actionInput || {});
-    const obs = result.content.map((c) => (c.type === "text" ? c.text : JSON.stringify(c.json))).join("\n");
-    step.observation = obs;
+    try {
+      step.observation = await runViaManager("datetime_info", step.actionInput || {});
+    } catch (err) {
+      step.observation = `Error: ${(err as Error).message}`;
+    }
+    observations.push(step.observation || "");
     steps.push(step);
     await onStep?.(step);
-    observations.push(obs);
   }
 
   // Synthesize answer
@@ -525,28 +573,30 @@ async function runRuleBasedAgent(
 export async function runAgent(
   task: string,
   forceMode?: "rule",
-  onStep?: (step: AgentStep) => void | Promise<void>
+  onStep?: (step: AgentStep) => void | Promise<void>,
+  options?: { toolAllowlist?: string[] }
 ): Promise<AgentResult> {
+  const allowlist = options?.toolAllowlist;
   const mode = forceMode === "rule" ? "none" : getLLMMode();
 
   if (mode === "sampling") {
     try {
-      return await runLLMAgent(task, "sampling", onStep);
+      return await runLLMAgent(task, "sampling", onStep, { toolAllowlist: allowlist });
     } catch (samplingErr) {
       const httpConfig = getLLMConfig();
       if (httpConfig) {
         try {
-          return await runLLMAgent(task, "http", onStep);
+          return await runLLMAgent(task, "http", onStep, { toolAllowlist: allowlist });
         } catch (httpErr) {
           const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
           const hMsg = httpErr instanceof Error ? httpErr.message : String(httpErr);
-          const result = await runRuleBasedAgent(task, onStep);
+          const result = await runRuleBasedAgent(task, onStep, allowlist);
           result.answer = `[LLM errors: sampling (${sMsg}), http (${hMsg})] — falling back to rule-based mode.\n\n${result.answer}`;
           return result;
         }
       }
       const sMsg = samplingErr instanceof Error ? samplingErr.message : String(samplingErr);
-      const result = await runRuleBasedAgent(task, onStep);
+      const result = await runRuleBasedAgent(task, onStep, allowlist);
       result.answer = `[Sampling error: ${sMsg}] — falling back to rule-based mode.\n\n${result.answer}`;
       return result;
     }
@@ -554,14 +604,14 @@ export async function runAgent(
 
   if (mode === "http") {
     try {
-      return await runLLMAgent(task, "http", onStep);
+      return await runLLMAgent(task, "http", onStep, { toolAllowlist: allowlist });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const result = await runRuleBasedAgent(task, onStep);
+      const result = await runRuleBasedAgent(task, onStep, allowlist);
       result.answer = `[LLM error: ${msg}] — falling back to rule-based mode.\n\n${result.answer}`;
       return result;
     }
   }
 
-  return await runRuleBasedAgent(task, onStep);
+  return await runRuleBasedAgent(task, onStep, allowlist);
 }

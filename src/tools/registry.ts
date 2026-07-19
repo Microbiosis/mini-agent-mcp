@@ -38,9 +38,26 @@ export function getTool(name: string): ToolDefinition | undefined {
  *
  * If AnySearch is unreachable, returns only local tools —
  * the server continues to work without search capabilities.
+ *
+ * `includeOrchestration` controls whether run_workflow / deep_research
+ * are exposed to the embedded Agent. They are NOT recursive-safe when
+ * invoked from inside run_workflow / deep_research itself, so nested
+ * runs pass `includeOrchestration: false`.
  */
-export async function buildToolList(): Promise<ToolDefinition[]> {
+export async function buildToolList(options: { includeOrchestration?: boolean } = {}): Promise<ToolDefinition[]> {
   const tools = [...allTools];
+
+  // Memory + Skill internal modules (excluding run_workflow/deep_research
+  // by default at the top-level context, since they would never be useful
+  // via direct function calling — they accept argument shapes designed
+  // for human callers). Orchestration tools are added when requested.
+  try {
+    const { getInternalModuleDefinitions } = await import("./internal-modules.js");
+    tools.push(...getInternalModuleDefinitions({ includeOrchestration: options.includeOrchestration !== false }));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[registry] Internal modules not available: ${msg}`);
+  }
 
   // Lazily trigger AnySearch discovery + ToolManager registration.
   // First call pays the discovery cost (~1-3s); subsequent calls use cache.

@@ -151,12 +151,14 @@ export async function ensureAnySearchTools(): Promise<ToolDefinition[]> {
       timeoutMs: 60000,
       concurrencySafe: false,
       execute: async (args) => {
-        const result = await (
-          t.handler as (
-            args: Record<string, unknown>
-          ) => Promise<{ content: Array<{ type: string; text: string }> }>
-        )(args);
-        return result.content.map((c) => c.text).join("\n");
+        const result = await t.handler(args);
+        // Preserve the upstream `isError` flag — AnySearch failures should
+        // appear as hard errors to ToolManager, not successful strings.
+        if (result.isError) {
+          const text = result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+          throw new Error(text || "AnySearch tool returned an error");
+        }
+        return result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
       },
     });
   }

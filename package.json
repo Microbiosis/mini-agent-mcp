@@ -4,6 +4,41 @@
   "description": "MCP server with an integrated ReAct mini-agent that autonomously uses tools. Includes AnySearch integration for web search and multi-model LLM communication via MCP sampling.",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent/react.d.ts",
+      "import": "./dist/agent/react.js"
+    },
+    "./agent/llm": {
+      "types": "./dist/agent/llm.d.ts",
+      "import": "./dist/agent/llm.js"
+    },
+    "./tools/manager": {
+      "types": "./dist/tools/manager.d.ts",
+      "import": "./dist/tools/manager.js"
+    },
+    "./tools/internal-modules": {
+      "types": "./dist/tools/internal-modules.d.ts",
+      "import": "./dist/tools/internal-modules.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory/index.d.ts",
+      "import": "./dist/memory/index.js"
+    },
+    "./skill": {
+      "types": "./dist/skill/index.d.ts",
+      "import": "./dist/skill/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mini-agent-mcp": "dist/index.js"
   },
@@ -18,7 +53,19 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "node dist/index.js --test",
+    "test": "npm run test:meta && npm run test:dag && npm run test:research && npm run test:random && npm run test:dag-validation && npm run test:toolmanager && npm run test:internal-modules && npm run test:rule-mode && npm run test:sampling && npm run test:secret && npm run test:exports && npm run test:smoke",
+    "test:meta": "node scripts/test-package-metadata.mjs",
+    "test:dag": "node scripts/test-dag-buildStepTask.mjs",
+    "test:research": "node scripts/test-research-parser.mjs",
+    "test:random": "node scripts/test-random-validation.mjs",
+    "test:dag-validation": "node scripts/test-dag-validation.mjs",
+    "test:toolmanager": "node scripts/test-toolmanager.mjs",
+    "test:internal-modules": "node scripts/test-internal-modules.mjs",
+    "test:rule-mode": "node scripts/test-rule-mode.mjs",
+    "test:sampling": "node scripts/test-llm-sampling-context.mjs",
+    "test:secret": "node scripts/test-secret-scan.mjs",
+    "test:exports": "node scripts/test-package-exports.mjs",
+    "test:smoke": "node dist/index.js --test",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.{ts,json}\"",

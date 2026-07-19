@@ -55,10 +55,21 @@ export function parseSubQuestions(answer: string, max = 5): string[] {
 }
 
 /**
+ * Options accepted by `deepResearch`.
+ *
+ * `toolAllowlist` scopes the tools that the nested runAgent() calls may
+ * dispatch — used by the embedded `deep_research` tool to keep the agent
+ * from recursively calling `run_workflow` / `deep_research`.
+ */
+export interface DeepResearchOptions {
+  toolAllowlist?: string[];
+}
+
+/**
  * Run a deep research workflow on a question.
  * Uses the agent's search tools + LLM to produce a comprehensive report.
  */
-export async function deepResearch(question: string): Promise<ResearchResult> {
+export async function deepResearch(question: string, options: DeepResearchOptions = {}): Promise<ResearchResult> {
   const start = Date.now();
   const subQuestions: string[] = [];
   const findings: Array<{ question: string; findings: string }> = [];
@@ -77,7 +88,10 @@ Output ONLY a fenced code block containing the list. Each item must be on its ow
 - What is X?
 - How does Y work?
 - Why does Z matter?
-\`\`\``
+\`\`\``,
+    undefined,
+    undefined,
+    { toolAllowlist: options.toolAllowlist }
   );
   totalSteps++;
 
@@ -94,7 +108,10 @@ Output ONLY a fenced code block containing the list. Each item must be on its ow
   for (const sq of subQuestions) {
     const searchResult = await runAgent(
       `Search for information about: "${sq}". 
-Then summarize what you found in 3-5 bullet points. Be factual and cite specific details.`
+Then summarize what you found in 3-5 bullet points. Be factual and cite specific details.`,
+      undefined,
+      undefined,
+      { toolAllowlist: options.toolAllowlist }
     );
     totalSteps++;
     findings.push({ question: sq, findings: searchResult.answer });
@@ -116,7 +133,10 @@ Write a complete report with:
 2. Key Findings (organized by sub-topic)
 3. Conclusions
 
-Format in Markdown. Be thorough and informative.`
+Format in Markdown. Be thorough and informative.`,
+    undefined,
+    undefined,
+    { toolAllowlist: options.toolAllowlist }
   );
   totalSteps++;
 

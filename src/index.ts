@@ -11,8 +11,34 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 // Note: AnySearch is discovered lazily on first run_agent call — not eagerly at startup.
 import { calculator, textStats, textTransform, unitConvert, datetimeInfo, randomGen } from "./tools/index.js";
+import { runWorkflowTool, deepResearchTool, rememberTool, recallTool, searchMemoriesTool, memoryStatsTool, extractSkillTool, matchSkillTool, useSkillTool, listSkillsTool } from "./tools/internal-modules.js";
 import { runAgent } from "./agent/react.js";
 import { toolManager } from "./tools/manager.js";
+import { withRequestContext } from "./agent/llm.js";
+
+// ─── Public library exports (consumed via `mini-agent-mcp`) ──────────────
+// These let downstream embedders reuse the same ToolManager singleton,
+// helper for the MCP server entrypoint, and the FastMCP registration
+// helpers without depending on side-effectful module evaluation.
+// All CLI/server-side setup is guarded by `isMain` so library import is pure.
+export { toolManager, ToolManagerImpl } from "./tools/manager.js";
+export { runAgent } from "./agent/react.js";
+export {
+  runWorkflowTool,
+  deepResearchTool,
+  rememberTool,
+  recallTool,
+  searchMemoriesTool,
+  memoryStatsTool,
+  extractSkillTool,
+  matchSkillTool,
+  useSkillTool,
+  listSkillsTool,
+  getInternalModuleDefinitions,
+} from "./tools/internal-modules.js";
+export { withRequestContext, getRequestContext } from "./agent/llm.js";
+export type { ToolEntry, ToolCallRecord } from "./tools/manager.js";
+export type { AgentStep, AgentResult } from "./agent/react.js";
 
 // ─── Load .env ────────────────────────────────────────────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -92,6 +118,45 @@ for (const [, def] of Object.entries({
   registerInternalTool(def.name, def.description, def.inputSchema, def.handler, 30000);
 }
 
+// Advanced internal tools — workflow / research / memory / skill.
+// These are registered ONLY into ToolManager; they are never exposed via
+// FastMCP.addTool, keeping `tools/list` identical (only `run_agent`).
+const advancedInternalTools: Array<{
+  def: { name: string; description: string; handler: (args: Record<string, unknown>) => Promise<unknown> };
+  timeoutMs: number;
+  concurrencySafe?: boolean;
+}> = [
+  { def: runWorkflowTool, timeoutMs: 300_000, concurrencySafe: false }, // Up to 5 min per orchestrator call.
+  { def: deepResearchTool, timeoutMs: 600_000, concurrencySafe: false }, // Deep research can take ~10 min on cold start.
+  { def: rememberTool, timeoutMs: 5_000 },
+  { def: recallTool, timeoutMs: 5_000 },
+  { def: searchMemoriesTool, timeoutMs: 5_000 },
+  { def: memoryStatsTool, timeoutMs: 5_000 },
+  { def: extractSkillTool, timeoutMs: 5_000 },
+  { def: matchSkillTool, timeoutMs: 5_000 },
+  { def: useSkillTool, timeoutMs: 5_000 },
+  { def: listSkillsTool, timeoutMs: 5_000 },
+];
+for (const { def, timeoutMs, concurrencySafe } of advancedInternalTools) {
+  toolManager.register({
+    name: def.name,
+    description: def.description,
+    timeoutMs,
+    concurrencySafe: concurrencySafe ?? true,
+    execute: async (args) => {
+      const result = (await def.handler(args)) as
+        | { isError?: boolean; content?: Array<{ type: string; text?: string }> }
+        | undefined;
+      if (result?.isError) {
+        const text = (result.content || []).map((c) => (c.type === "text" ? c.text || "" : "")).join("\n");
+        throw new Error(text || `${def.name} returned an error`);
+      }
+      const content = result?.content || [];
+      return content.map((c) => (c.type === "text" ? c.text || "" : "")).join("\n");
+    },
+  });
+}
+
 // run_agent — direct addTool (bypasses ToolManager) so the handler can
 // receive the FastMCP context and stream per-step progress via
 // context.streamContent. Long-running tasks (e.g. multi-step LLM
@@ -134,27 +199,45 @@ server.addTool({
       await context.streamContent({ type: "text", text: parts.join("\n") });
     };
 
-    const result = await runAgent(a.task, a.mode === "rule" ? "rule" : undefined, onStep);
-    const lines = [
-      `Task: ${a.task}`,
-      `Mode: ${result.llmPowered ? (result.llmMode === "sampling" ? "LLM (sampling)" : "LLM (HTTP)") : "Rule-based"}`,
-      `Steps: ${result.totalSteps}`,
-      "",
-    ];
-    if (result.steps.length > 0) {
-      lines.push("--- Reasoning Trace ---");
-      for (let i = 0; i < result.steps.length; i++) {
-        const s = result.steps[i];
-        lines.push(`[Step ${i + 1}]`);
-        if (s.thought) lines.push(`  Thought: ${s.thought}`);
-        if (s.action) lines.push(`  Action: ${s.action}`);
-        if (s.observation) lines.push(`  Observation: ${s.observation}`);
-        if (s.finalAnswer) lines.push(`  Final Answer: ${s.finalAnswer}`);
-        lines.push("");
+    // Capture per-request context (FastMCP session + client capabilities)
+    // into an AsyncLocalStorage so `callLLM` can use `requestSampling()`
+    // against the correct session — not a process-global one.
+    const clientCaps = (context?.session as { clientCapabilities?: { sampling?: unknown } } | undefined)?.clientCapabilities;
+    const clientSupportsSampling = clientCaps ? Boolean(clientCaps.sampling) : false;
+    const session = context?.session;
+
+    const inner = async (): Promise<string> => {
+      const result = await runAgent(a.task, a.mode === "rule" ? "rule" : undefined, onStep);
+      const lines = [
+        `Task: ${a.task}`,
+        `Mode: ${result.llmPowered ? (result.llmMode === "sampling" ? "LLM (sampling)" : "LLM (HTTP)") : "Rule-based"}`,
+        `Steps: ${result.totalSteps}`,
+        "",
+      ];
+      if (result.steps.length > 0) {
+        lines.push("--- Reasoning Trace ---");
+        for (let i = 0; i < result.steps.length; i++) {
+          const s = result.steps[i];
+          lines.push(`[Step ${i + 1}]`);
+          if (s.thought) lines.push(`  Thought: ${s.thought}`);
+          if (s.action) lines.push(`  Action: ${s.action}`);
+          if (s.observation) lines.push(`  Observation: ${s.observation}`);
+          if (s.finalAnswer) lines.push(`  Final Answer: ${s.finalAnswer}`);
+          lines.push("");
+        }
       }
-    }
-    lines.push("--- Final Answer ---", result.answer);
-    return lines.join("\n");
+      lines.push("--- Final Answer ---", result.answer);
+      return lines.join("\n");
+    };
+    return await withRequestContext(
+      {
+        session: session as unknown as Parameters<typeof withRequestContext>[0]["session"],
+        clientSupportsSampling,
+        sessionId: context?.sessionId,
+        requestId: context?.requestId,
+      },
+      inner
+    );
   },
 });
 
@@ -162,6 +245,7 @@ server.addTool({
 if (process.argv.includes("--test")) {
   console.log("=== Mini Agent MCP — Test Mode ===\n");
   const testArgs: Record<string, Record<string, unknown>> = {
+    // Deterministic, no-network test inputs for the 6 built-in tools.
     calculator: { expression: "sqrt(144) + 2^3" },
     text_stats: { text: "Hello world! This is a test. Hello again." },
     text_transform: { text: "hello world", operation: "uppercase" },
@@ -169,21 +253,44 @@ if (process.argv.includes("--test")) {
     datetime_info: { operation: "now", timezone: "Asia/Shanghai" },
     random_gen: { operation: "uuid" },
   };
+
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
+
   for (const tool of toolManager.list()) {
     const args = testArgs[tool.name];
+    console.log(`--- ${tool.name} ---`);
     if (!args) {
-      console.log(`--- ${tool.name} ---\n(skipped)\n`);
+      console.log("(skipped — no deterministic test input wired)\n");
+      skipped++;
       continue;
     }
-    console.log(`--- ${tool.name} ---`);
     try {
-      console.log(await tool.execute(args));
-    } catch {
-      console.log("(error)");
+      const out = await toolManager.execute(tool.name, args);
+      const looksLikeError = typeof out === "string" && out.startsWith("Error:");
+      if (looksLikeError) {
+        console.log(out);
+        console.log("FAIL\n");
+        failed++;
+      } else {
+        console.log(out);
+        console.log("PASS\n");
+        passed++;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(msg);
+      console.log("FAIL\n");
+      failed++;
     }
-    console.log("");
   }
-  console.log("=== All tests passed ===");
+
+  console.log(`=== Summary: ${passed} passed, ${failed} failed, ${skipped} skipped (${toolManager.size} total) ===`);
+  if (failed > 0) {
+    console.error(`Test mode failing — ${failed} tool(s) failed.`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 

@@ -12,6 +12,7 @@ dist/
 # Runtime data
 .memory/
 .skills/
+.mini-agent/
 
 # AIGC notes
 Agent项目收集总结.md
@@ -42,3 +43,6 @@ Thumbs.db
 
 # IDE / tool generated file lists
 tracked_files.txt
+
+# Scratch files left by ad-hoc resolution probes
+exports-probe.mjs

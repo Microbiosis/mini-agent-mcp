@@ -1,5 +1,6 @@
 # Mini Agent MCP
 
+[![CI](https://img.shields.io/github/actions/workflow/status/Microbiosis/mini-agent-mcp/ci.yml?branch=main&style=flat-square)](https://github.com/Microbiosis/mini-agent-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/mini-agent-mcp.svg?style=flat-square)](https://www.npmjs.com/package/mini-agent-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/mini-agent-mcp.svg?style=flat-square)](https://www.npmjs.com/package/mini-agent-mcp)
 [![GitHub license](https://img.shields.io/github/license/Microbiosis/mini-agent-mcp?style=flat-square)](https://github.com/Microbiosis/mini-agent-mcp/blob/main/LICENSE)
@@ -10,6 +11,14 @@
 > 一个基于 **FastMCP + OpenAI SDK** 的 MCP 智能代理服务器  
 > 集成 **ReAct Agent**、**DAG 工作流**、**深度研究**、**持久化记忆**、**技能学习**、**AnySearch 检索**等能力  
 > 单二进制即可托管 / 本地部署 / 嵌入任意 MCP 客户端
+
+> ⚠️ **安全告警（2026-07）**：早期版本中，`scripts/` 下的 9 个测试文件曾把一个 LongCat LLM API key（`ak_2wG...`，前缀已泄露）直接硬编码进 Git 仓库。该凭证**必须视为已泄露**——已有 Git 历史记录，单纯删除文件无法回收。请立即：
+>
+> 1. 在供应商控制台**撤销并轮换**该 key；
+> 2. 通过 CI Secret Store / `process.env.LLM_API_KEY` 重新注入；
+> 3. 在 PR 流程中加入 `node scripts/test-secret-scan.mjs` 作为 CI 防护。
+>
+> 当前所有脚本已改为读取环境变量，缺凭据时清晰 SKIP 并退出 0。
 
 ---
 
@@ -168,7 +177,7 @@ LLM_MAX_TOKENS=4096
 
 # Agent 行为调优
 AGENT_MAX_TURNS=5          # ReAct 推理步数上限（1-50）
-AGENT_TOOL_RETRY=1         # 工具失败重试次数（0-3）
+# AGENT_TOOL_RETRY=1       # 已废弃 — 仅 TOOL_RETRY_COUNT 生效
 
 # ToolManager 调优
 TOOL_MAX_CONCURRENT=10     # 并发执行上限
@@ -206,7 +215,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 | 工具 | 参数 | 用途 | 超时 |
 |------|------|------|------|
-| `run_agent` | `task: string`<br>`mode?: 'auto'\|'rule'` | 把任务委派给内置 ReAct Agent；Agent 自动选择并调用 14 个内部工具完成。`rule` 强制正则模式（无需 LLM） | 120s |
+| `run_agent` | `task: string`<br>`mode?: 'auto'\|'rule'` | 把任务委派给内置 ReAct Agent；Agent 自动选择并调用 14 个内部工具完成。`rule` 强制正则模式（无需 LLM） | 600s |
 
 **`run_agent` 返回结构**：
 
@@ -339,10 +348,11 @@ Result: 11.872983346207417
 
 ## 八、Hooks 系统（Yao 模式）
 
-`src/agent/react.ts` 暴露两个 Hook 点，可在不修改 Agent 内核的前提下注入自定义行为：
+`src/agent/react.ts` 暴露两个 Hook 点，可在不修改 Agent 内核的前提下注入自定义行为。Hooks 通过 `mini-agent-mcp/agent` 子路径导出。
 
 ```ts
-import { addCreateHook, addNextHook, clearHooks } from "mini-agent-mcp";
+// 发布包中通过子路径导入
+import { addCreateHook, addNextHook, clearHooks } from "mini-agent-mcp/agent";
 
 addCreateHook(async (ctx, messages) => {
   // LLM 调用前，可注入 / 修改 / 取消消息
@@ -490,7 +500,7 @@ interface Skill {
 | `LLM_PROVIDER` | 否 | `default` | 从 `providers.json` 选命名供应商 |
 | `LLM_PROVIDERS_PATH` | 否 | — | 命名供应商配置文件路径 |
 | `AGENT_MAX_TURNS` | 否 | `5` | ReAct 推理步数上限（1-50） |
-| `AGENT_TOOL_RETRY` | 否 | `1` | 工具失败重试（0-3） |
+| `AGENT_TOOL_RETRY` | 否 | **未实现** | 历史上文档化的变量；当前 `ToolManager` 仅识别 `TOOL_RETRY_COUNT`。将以下代码删除前请保留旧行为兼容性。 |
 | `TOOL_MAX_CONCURRENT` | 否 | `10` | ToolManager 并发上限 |
 | `TOOL_RETRY_COUNT` | 否 | `2` | 瞬时错误重试（0-5） |
 | `ANYSEARCH_API_KEY` | 否 | 匿名 | AnySearch 提升配额 |
@@ -500,18 +510,22 @@ interface Skill {
 
 ```json
 {
-  "openai": {
-    "apiKey": "sk-...",
-    "baseUrl": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini"
-  },
-  "deepseek": {
-    "apiKey": "sk-...",
-    "baseUrl": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat"
+  "providers": {
+    "openai": {
+      "apiKey": "sk-...",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini"
+    },
+    "deepseek": {
+      "apiKey": "sk-...",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat"
+    }
   }
 }
 ```
+
+> ⚠️ 命名空间必须是 `providers`（运行时在 `loadProviderConfig()` 读取 `content.providers?.[providerName]`），旧示例直接平铺命名空间已不再生效。
 
 启动时设置 `LLM_PROVIDERS_PATH=/path/to/providers.json` + `LLM_PROVIDER=openai`。
 
@@ -598,6 +612,53 @@ mini-agent-mcp/
 - **本地优先**：记忆 / 技能持久化到本地 JSON，无需外部数据库
 - **零配置可启动**：最小可用配置为 0（默认走 Sampling 或 Rule-based）
 - **可观测性**：Hooks（§八）提供 LLM 调用前后拦截点，可注入审计日志 / 调用统计 / 安全告警；ToolManager 内置调用历史，便于回放与调试
+
+### 子路径导入（library 消费）
+
+`package.json` 通过 `exports` 字段暴露以下子路径：
+
+| specifier | 暴露的内容 |
+|---|---|
+| `mini-agent-mcp` | 工具 + Agent 编排器 + ToolManager + Hooks + LLM 上下文（聚合入口） |
+| `mini-agent-mcp/agent` | `runAgent`、`addCreateHook`、`addNextHook`、`clearHooks` |
+| `mini-agent-mcp/agent/llm` | `callLLM`、`isSamplingAvailable`、`getLLMMode`、`withRequestContext` 等 |
+| `mini-agent-mcp/tools/manager` | `toolManager` 单例、`ToolManagerImpl` 类、`ToolEntry` 类型 |
+| `mini-agent-mcp/tools/internal-modules` | `runWorkflowTool`、`deepResearchTool`、`rememberTool` 等高级内部工具定义 |
+| `mini-agent-mcp/workflow` | `runWorkflow`、`deepResearch`、`parseSubQuestions`、`buildStepTask` |
+| `mini-agent-mcp/memory` | `remember`、`recall`、`searchMemories`、`getMemoryStats` 等 |
+| `mini-agent-mcp/skill` | `extractSkill`、`matchSkill`、`useSkill`、`listSkills`、`getSkillStats` |
+
+每个 specifier 在 `npm install` 后可直接 `import`，`scripts/test-package-exports.mjs` 把它们当作一组集成的"包边界"测试在 CI 中验证。
+
+---
+
+## 十五、CI 与本地复现
+
+`.github/workflows/ci.yml` 在每次 push / PR 触发，依次跑：
+
+| Job | 触发 | 关键步骤 |
+|---|---|---|
+| **test**（matrix Node 18/20/22/24） | push / PR 到 `main` | `npm ci` → `npm run build` → `npm run lint` → `npm run format:check` → `npm test`（含 secret scan + 包边界测试） |
+| **secret-scan** | push / PR | `node scripts/test-secret-scan.mjs` |
+| **mcp-tools-list** | push / PR | `npm run build`，然后用 JSON-RPC 探测 `tools/list` 必须仅返回 `run_agent`（外部协议契约） |
+
+矩阵策略覆盖声明的 `engines.node: ">=18"`，每个 job 单独决定是否失败（`fail-fast: false`）。
+
+复现整套 CI（不需要 GitHub）：
+
+```bash
+npm ci
+npm run build
+npm run lint
+npm run format:check
+npm test
+node scripts/test-secret-scan.mjs
+
+# MCP 契约探测
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n' \
+  | node dist/index.js \
+  | node -e 'const lines=require("fs").readFileSync(0,"utf8").trim().split("\n"); const tools=JSON.parse(lines[lines.length-1]).result.tools; if (tools.length!==1||tools[0].name!=="run_agent") process.exit(1);'
+```
 
 ---
 

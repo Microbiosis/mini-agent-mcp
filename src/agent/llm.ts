@@ -1,12 +1,11 @@
 /**
  * LLM Communication Layer — powered by OpenAI SDK
  *
- * Uses the official OpenAI SDK for all LLM calls. This handles:
- *   - Authentication (Bearer <REDACTED>)
- *   - API format normalization
- *   - Retry logic with exponential backoff
- *   - Timeout handling
- *   - Token usage tracking
+ * Uses the official OpenAI SDK for direct HTTP calls. For MCP Sampling,
+ * the FastMCP server (`run_agent` handler) wraps the request in an
+ * AsyncLocalStorage context so that `callViaSampling` can dispatch through
+ * `FastMCP.requestSampling()` using the *correct* per-session server — not
+ * a process-global one.
  *
  * Modes (priority order):
  *   1. MCP Sampling — client handles LLM (zero config, when supported)
@@ -15,9 +14,38 @@
  */
 
 import OpenAI from "openai";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync, existsSync } from "node:fs";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions.js";
+
+// Minimal FastMCP session interface — only what sampling needs.
+interface FastMCPSessionLike {
+  requestSampling?: (
+    message: unknown,
+    options?: { timeout?: number }
+  ) => Promise<{ content: { type?: string; text?: string }; model: string; role: string }>;
+}
+
+interface RequestContext {
+  /** Per-request FastMCP session (used by `callViaSampling`). */
+  session?: FastMCPSessionLike;
+  /** Whether the connected MCP client advertised the `sampling` capability. */
+  clientSupportsSampling?: boolean;
+  sessionId?: string;
+  requestId?: string;
+}
+
+const requestStorage = new AsyncLocalStorage<RequestContext>();
+
+/** Run `fn` inside a per-request context — any LLM / Sampling calls inside
+ *  observe the same context via `getRequestContext()`. */
+export function withRequestContext<T>(ctx: RequestContext, fn: () => Promise<T>): Promise<T> {
+  return requestStorage.run(ctx, fn);
+}
+
+export function getRequestContext(): RequestContext | undefined {
+  return requestStorage.getStore();
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -76,13 +104,22 @@ export interface LLMResponse {
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
-let mcpServer: Server | null = null;
 let openaiClient: OpenAI | null = null;
 
-/** Set the MCP server instance for sampling mode */
-export function setLLMServer(server: Server): void {
-  mcpServer = server;
+/**
+ * Legacy global fallback for clients that still call this at startup.
+ *
+ * FastMCP 4.x does not expose a process-global raw SDK `Server`; the
+ * canonical path is via the per-request `FastMCPSession` captured inside
+ * `run_agent`. This setter remains so external embedders that want a
+ * process-wide fallback can still register one.
+ */
+export function setLLMSession(session: FastMCPSessionLike | null): void {
+  // Wrap in a global context for any code path that doesn't go through
+  // withRequestContext (e.g. legacy callers).
+  legacySession = session;
 }
+let legacySession: FastMCPSessionLike | null = null;
 
 // ─── Config helpers ──────────────────────────────────────────────────────────
 
@@ -169,9 +206,16 @@ export function resetOpenAIClient(): void {
 // ─── Capability checks ─────────────────────────────────────────────────────
 
 export function isSamplingAvailable(): boolean {
-  if (mcpServer === null) return false;
-  const caps = mcpServer.getClientCapabilities();
-  return caps != null && caps.sampling != null;
+  // Sampling is available when (a) the connected client advertised the
+  // `sampling` capability, AND (b) we have a session or legacy fallback
+  // capable of issuing `requestSampling`.
+  const ctx = getRequestContext();
+  const session = ctx?.session ?? legacySession;
+  if (!session || typeof session.requestSampling !== "function") return false;
+  if (ctx?.clientSupportsSampling !== undefined) return ctx.clientSupportsSampling;
+  // Without explicit info we err on the side of "available" — using a
+  // present capability is just a request that may be rejected by the client.
+  return true;
 }
 
 export function isHttpAvailable(): boolean {
@@ -215,6 +259,17 @@ export async function callLLM(
 // ─── MCP Sampling ──────────────────────────────────────────────────────────
 
 async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
+  const ctx = getRequestContext();
+  const session = ctx?.session ?? legacySession;
+  if (!session || typeof session.requestSampling !== "function") {
+    return {
+      content: "",
+      finishReason: "error",
+      error: true,
+      errorMessage: "MCP sampling not available for this request",
+    };
+  }
+
   try {
     const systemContent = messages.find((m) => m.role === "system")?.content;
     const systemPrompt = typeof systemContent === "string" ? systemContent : undefined;
@@ -229,14 +284,12 @@ async function callViaSampling(messages: LLMMessage[]): Promise<LLMResponse> {
       }));
 
     const maxTokens = getMaxTokens();
-    const result = await mcpServer!.createMessage(
-      { messages: chatMessages, systemPrompt, maxTokens },
-      { timeout: 120_000 }
-    );
+    const params = { messages: chatMessages, systemPrompt, maxTokens };
+    const result = await session.requestSampling(params, { timeout: 120_000 });
 
-    const content = result.content;
-    if (content && "text" in content) {
-      return { content: content.text as string, finishReason: "stop", error: false };
+    const content = result?.content;
+    if (content && typeof (content as { text?: unknown }).text === "string") {
+      return { content: (content as { text: string }).text, finishReason: "stop", error: false };
     }
 
     return {

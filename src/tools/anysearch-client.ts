@@ -45,6 +45,21 @@ export interface AnySearchTool {
   inputSchema: Record<string, unknown>;
 }
 
+/** Cooldown before retrying after a failure (ms). */
+const RECONNECT_COOLDOWN_MS = (() => {
+  const v = process.env.ANYSEARCH_RECONNECT_COOLDOWN_MS;
+  if (v) {
+    const n = parseInt(v, 10);
+    if (!isNaN(n) && n >= 0) return n;
+  }
+  return 30_000;
+})();
+
+/** In-flight connection promise, used to coalesce concurrent cold boots. */
+let clientPromise: Promise<Client> | null = null;
+/** Earliest permitted next reconnect attempt after a failure. */
+let nextRetryAt = 0;
+
 /** Get current runtime status for monitoring */
 export function getMCPStatus(): MCPRuntimeState {
   return { ...runtime, failureHistory: runtime.failureHistory.slice(-10) };
@@ -89,55 +104,71 @@ function transition(newState: MCPState, err?: unknown): void {
 
 // ─── Client with Runtime ─────────────────────────────────────────────────
 
-async function getClient(): Promise<Client> {
-  // Disabled state — don't attempt connection
-  if (runtime.state === "disabled") {
-    throw new Error("AnySearch MCP client is disabled (too many failures)");
-  }
+async function connectClient(): Promise<Client> {
+  const apiKey = process.env.ANYSEARCH_API_KEY;
+  const transport = new StreamableHTTPClientTransport(new URL(ANYSEARCH_MCP_URL), {
+    requestInit: apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : undefined,
+  });
+  const next = new Client({ name: "mini-agent-mcp-anysearch", version }, { capabilities: {} });
+  await next.connect(transport);
+  return next;
+}
 
-  // Degraded state — try reconnecting
-  if (runtime.state === "degraded" && runtime.consecutiveFailures >= 5) {
-    runtime.state = "disabled";
-    console.error("[MCPRuntime] Too many failures, disabling AnySearch");
-    throw new Error("AnySearch disabled after 5 consecutive failures");
+async function getClient(): Promise<Client> {
+  // Disabled state — surface a clear message; resetMCPRuntime() lifts it.
+  if (runtime.state === "disabled") {
+    throw new Error("AnySearch MCP client is disabled (too many failures). Call resetMCPRuntime() to retry.");
   }
 
   if (client) return client;
+  if (clientPromise) return clientPromise;
+
+  // Cooldown: respect a backoff after a transient/degraded failure so we
+  // don't hammer the upstream.
+  if (nextRetryAt > Date.now() && (runtime.state === "degraded" || runtime.state === "error")) {
+    throw new Error(
+      `AnySearch waiting for cooldown (${Math.ceil((nextRetryAt - Date.now()) / 1000)}s remaining)`
+    );
+  }
 
   transition("connecting");
-
-  try {
-    const apiKey = process.env.ANYSEARCH_API_KEY;
-    const transport = new StreamableHTTPClientTransport(new URL(ANYSEARCH_MCP_URL), {
-      requestInit: apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : undefined,
+  clientPromise = connectClient()
+    .then((c) => {
+      client = c;
+      transition("connected");
+      return c;
+    })
+    .catch((err) => {
+      const type = classifyError(err);
+      if (type === "hard") {
+        transition("error", err);
+        if (runtime.consecutiveFailures >= 2) {
+          runtime.state = "disabled";
+          console.error("[MCPRuntime] Persistent hard errors — disabling AnySearch");
+        }
+      } else {
+        transition("degraded", err);
+        nextRetryAt = Date.now() + RECONNECT_COOLDOWN_MS;
+      }
+      throw err;
+    })
+    .finally(() => {
+      clientPromise = null;
     });
-
-    client = new Client({ name: "mini-agent-mcp-anysearch", version }, { capabilities: {} });
-
-    await client.connect(transport);
-    transition("connected");
-    return client;
-  } catch (err) {
-    const type = classifyError(err);
-    if (type === "hard") {
-      transition("error", err);
-    } else {
-      transition("degraded", err);
-    }
-    throw err;
-  }
+  return clientPromise;
 }
 
 /**
  * List tools from AnySearch with runtime management.
- * Returns cached tools if available, even in degraded mode.
+ * Returns cached tools if available. A first-time discovery failure does
+ * NOT cache an empty list — it re-throws so callers can keep retrying.
+ * A stale cache, if present, is still served so end users see *some*
+ * tools when the upstream is flapping.
  */
 export async function listAnySearchTools(): Promise<AnySearchTool[]> {
   if (cachedTools) return cachedTools;
-
-  // In degraded/error mode, return empty (search tools unavailable)
-  if (runtime.state === "degraded" || runtime.state === "error" || runtime.state === "disabled") {
-    return [];
+  if (runtime.state === "disabled") {
+    throw new Error("AnySearch MCP client is disabled (too many failures). Call resetMCPRuntime() to retry.");
   }
 
   try {
@@ -149,8 +180,12 @@ export async function listAnySearchTools(): Promise<AnySearchTool[]> {
       inputSchema: (t.inputSchema || { type: "object", properties: {} }) as Record<string, unknown>,
     }));
     return cachedTools;
-  } catch {
-    return [];
+  } catch (err) {
+    if (cachedTools && cachedTools.length > 0) {
+      console.error(`[MCPRuntime] Discovery failed (${(err as Error).message}); serving stale cache`);
+      return cachedTools;
+    }
+    throw err;
   }
 }
 
@@ -165,6 +200,13 @@ export async function callAnySearchTool(toolName: string, args: Record<string, u
   try {
     const c = await getClient();
     const response = await c.callTool({ name: toolName, arguments: args }, undefined, { timeout: 60_000 });
+
+    // If upstream signals isError, propagate that to the caller via throw so
+    // ToolManager treats it as a hard error and records the failure rather
+    // than logging it as a "successful" text observation.
+    if (response && (response as { isError?: boolean }).isError) {
+      throw new Error(`AnySearch tool '${toolName}' returned an error response`);
+    }
 
     const content = response.content as unknown as Array<
       | { type: "text"; text: string }
@@ -185,8 +227,13 @@ export async function callAnySearchTool(toolName: string, args: Record<string, u
     const type = classifyError(err);
     if (type === "hard") {
       transition("error", err);
+      if (runtime.consecutiveFailures >= 2) {
+        runtime.state = "disabled";
+        console.error("[MCPRuntime] Persistent hard errors — disabling AnySearch");
+      }
     } else {
       transition("degraded", err);
+      nextRetryAt = Date.now() + RECONNECT_COOLDOWN_MS;
     }
     throw err;
   }
@@ -199,15 +246,19 @@ export async function closeAnySearch(): Promise<void> {
   if (client) {
     await client.close();
     client = null;
-    cachedTools = null;
   }
+  cachedTools = null;
+  clientPromise = null;
   runtime = { state: "idle", consecutiveFailures: 0, failureHistory: [] };
+  nextRetryAt = 0;
 }
 
 /** Reset runtime state (e.g., for retry after disable) */
 export function resetMCPRuntime(): void {
-  if (runtime.state === "disabled") {
-    runtime = { state: "idle", consecutiveFailures: 0, failureHistory: [] };
-    console.error("[MCPRuntime] Reset — reconnection will be attempted on next call");
-  }
+  runtime = { state: "idle", consecutiveFailures: 0, failureHistory: [] };
+  client = null;
+  clientPromise = null;
+  cachedTools = null;
+  nextRetryAt = 0;
+  console.error("[MCPRuntime] Reset — reconnection will be attempted on next call");
 }

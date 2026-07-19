@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same ref; saves CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `engines.node` declares >=18 in package.json; CI covers 18 → current LTS.
+        node-version: [18.x, 20.x, 22.x, 24.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (tsc)
+        run: npm run build
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Format check (prettier)
+        run: npm run format:check
+
+      # Run the FULL deterministic test suite, including the secret scan and
+      # package-exports boundary test. CI must fail loudly if any of these
+      # regress so reviewers see the signal on every PR.
+      - name: Run tests
+        run: npm test
+
+      - name: Secret scan
+        # Independent of the `npm test` aggregation so a leaked credential can
+        # never be hidden by a tooling failure elsewhere.
+        run: node scripts/test-secret-scan.mjs
+
+  secret-scan:
+    name: Secret scan (no network)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for committed credentials
+        run: node scripts/test-secret-scan.mjs
+
+  mcp-tools-list:
+    name: MCP tools/list contract
+    # The MCP tool surface must return exactly one tool (`run_agent`) — any
+    # regression that exposes advanced internal tools externally is a
+    # breaking change. This is a fast, no-network JSON-RPC probe.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+      - run: npm run build
+      - name: Probe MCP initialize
+        run: |
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci-probe","version":"1"}}}' \
+            | node dist/index.js | head -n 5
+      - name: Probe MCP tools/list
+        run: |
+          printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci-probe","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n' \
+            | node dist/index.js \
+            | node -e '
+              const data = require("fs").readFileSync(0, "utf8");
+              const lines = data.trim().split("\n");
+              const last = JSON.parse(lines[lines.length - 1]);
+              const tools = last.result?.tools || [];
+              if (!Array.isArray(tools) || tools.length !== 1 || tools[0].name !== "run_agent") {
+                console.error("FAIL: tools/list must return exactly one tool named run_agent");
+                console.error("got:", JSON.stringify(tools));
+                process.exit(1);
+              }
+              console.log("OK: tools/list -> [" + tools.map(t => t.name).join(",") + "]");
+            '

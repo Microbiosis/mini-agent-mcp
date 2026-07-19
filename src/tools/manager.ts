@@ -5,7 +5,13 @@
  *   - Single registry for all tools (local + remote)
  *   - Per-call timeout enforcement
  *   - Concurrency caps (max parallel executions)
+ *   - Per-tool mutual exclusion when `concurrencySafe === false`
  *   - Call history tracking
+ *
+ * Timeouts do NOT trigger automatic retries: the underlying async work
+ * keeps running and may produce duplicate side effects if the same call
+ * were re-issued. Only re-classified transient errors (5xx / 429 / reset)
+ * are retried.
  */
 
 export interface ToolEntry {
@@ -53,11 +59,13 @@ function classifyToolError(err: unknown): "hard" | "transient" {
   return "hard";
 }
 
-class ToolManagerImpl {
+export class ToolManagerImpl {
   private tools: Map<string, ToolEntry> = new Map();
   private activeCalls = 0;
   private callHistory: ToolCallRecord[] = [];
   private maxConcurrent = 10;
+  /** Per-tool mutex queues for `concurrencySafe: false` tools. */
+  private perToolQueues: Map<string, Promise<unknown>> = new Map();
 
   constructor() {
     // Load max concurrent from env, default 10
@@ -99,9 +107,32 @@ class ToolManagerImpl {
   }
 
   /**
+   * Acquire the per-tool mutex for tools that are NOT concurrency-safe.
+   * Calls are chained so they run strictly sequentially; downstream
+   * callers always see the previous call resolved before starting.
+   */
+  private async withPerToolLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.perToolQueues.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.perToolQueues.set(name, prev.then(() => next));
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+      // Compact: if no other call has queued in the meantime, drop the entry.
+      if (this.perToolQueues.get(name) === next) this.perToolQueues.delete(name);
+    }
+  }
+
+  /**
    * Execute a tool with smart_retry, timeout, and concurrency enforcement.
    * - Hard errors (401/403/refused) → fail immediately
-   * - Transient errors (timeout/429/5xx) → retry with exponential backoff
+   * - Transient errors (429/5xx/reset — NOT timeouts) → retry with exponential backoff
+   * - `concurrencySafe: false` tools are serialized per name
    */
   async execute(name: string, args: Record<string, unknown>): Promise<string> {
     const tool = this.tools.get(name);
@@ -116,66 +147,75 @@ class ToolManagerImpl {
     const guardrailError = this.runGuardrails(name, args);
     if (guardrailError) return guardrailError;
 
-    this.activeCalls++;
-    const start = Date.now();
-    let error = false;
-    let result: string;
-
-    try {
-      // Smart retry loop
-      for (let attempt = 1; attempt <= TOOL_RETRY_COUNT + 1; attempt++) {
-        try {
-          result = await this.executeWithTimeout(tool, args);
-          error = false;
-          break;
-        } catch (err) {
-          const type = classifyToolError(err);
-          if (type === "hard" || attempt > TOOL_RETRY_COUNT) {
-            error = true;
-            result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    const dispatcher = async (): Promise<{ result: string; error: boolean }> => {
+      this.activeCalls++;
+      const start = Date.now();
+      let result: string | undefined;
+      let error = false;
+      try {
+        for (let attempt = 1; attempt <= TOOL_RETRY_COUNT + 1; attempt++) {
+          try {
+            result = await this.executeWithTimeout(tool, args);
+            error = false;
             break;
+          } catch (err) {
+            const type = classifyToolError(err);
+            // Timeouts always fail through without retry — the underlying
+            // async work is still in flight and re-invoking would produce
+            // duplicate side effects.
+            const isTimeout = err instanceof Error && err.message.startsWith(`Tool '${tool.name}' timed out`);
+            if (type === "hard" || isTimeout || attempt > TOOL_RETRY_COUNT) {
+              error = true;
+              result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+              break;
+            }
+            const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+            console.error(
+              `[ToolManager] Retry ${attempt}/${TOOL_RETRY_COUNT} for '${tool.name}' after ${delay}ms`
+            );
+            await new Promise((r) => setTimeout(r, delay));
           }
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
-          console.error(
-            `[ToolManager] Retry ${attempt}/${TOOL_RETRY_COUNT} for '${tool.name}' after ${delay}ms`
-          );
-          await new Promise((r) => setTimeout(r, delay));
         }
+      } finally {
+        this.activeCalls--;
       }
-    } finally {
-      this.activeCalls--;
-    }
+      const finalResult = result ?? `Error: tool '${name}' produced no result`;
+      this.callHistory.push({
+        toolName: name,
+        args,
+        result: finalResult,
+        durationMs: Date.now() - start,
+        error,
+        timestamp: Date.now(),
+      });
+      return { result: finalResult, error };
+    };
 
-    this.callHistory.push({
-      toolName: name,
-      args,
-      result: result!,
-      durationMs: Date.now() - start,
-      error,
-      timestamp: Date.now(),
-    });
-
-    return result!;
+    const dispatched = tool.concurrencySafe ? await dispatcher() : await this.withPerToolLock(name, dispatcher);
+    return dispatched.result;
   }
 
   /** Execute with timeout */
   private executeWithTimeout(tool: ToolEntry, args: Record<string, unknown>): Promise<string> {
     return new Promise((resolve, reject) => {
-      // Only set timeout if not already negative
       const timeout = tool.timeoutMs > 0 ? tool.timeoutMs : 30000;
-      const timer = setTimeout(() => {
-        reject(new Error(`Tool '${tool.name}' timed out after ${timeout}ms`));
-      }, timeout);
-
+      let settled = false;
+      let timerRef: { value: NodeJS.Timeout } | null = null;
+      const finish = (cb: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timerRef) clearTimeout(timerRef.value);
+        cb();
+      };
+      timerRef = {
+        value: setTimeout(() => {
+          finish(() => reject(new Error(`Tool '${tool.name}' timed out after ${timeout}ms`)));
+        }, timeout),
+      };
+      timerRef.value.unref?.();
       tool.execute(args).then(
-        (result) => {
-          clearTimeout(timer);
-          resolve(result);
-        },
-        (err) => {
-          clearTimeout(timer);
-          reject(err);
-        }
+        (result) => finish(() => resolve(result)),
+        (err) => finish(() => reject(err))
       );
     });
   }

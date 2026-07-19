@@ -71,21 +71,37 @@ export function buildStepTask(step: WorkflowStep, completed: Map<string, string>
  *
  * For dependent steps, the results of prerequisite steps are automatically
  * appended to the step's task before it is executed. See `buildStepTask`.
+ *
+ * `options.toolAllowlist` scopes the tools that nested runAgent() calls
+ * may dispatch — used by `run_workflow` to avoid recursive orchestration.
  */
-export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult> {
+export interface RunWorkflowOptions {
+  toolAllowlist?: string[];
+}
+export async function runWorkflow(steps: WorkflowStep[], options: RunWorkflowOptions = {}): Promise<WorkflowResult> {
+  // Validate step definition shape up-front, so the user gets a clear error
+  // rather than a deadlock later.
+  validateSteps(steps);
+
   const start = Date.now();
   const completed = new Map<string, string>();
   const results: WorkflowResult["steps"] = [];
 
-  // Validate no circular dependencies
+  // Detect cycles. Build a local id-index to make repeated lookups cheap.
+  const byId = new Map(steps.map((s) => [s.id, s]));
   const visited = new Set<string>();
   function checkCycle(id: string, path: Set<string>) {
     if (path.has(id)) throw new Error(`Circular dependency detected: ${id}`);
     if (visited.has(id)) return;
     visited.add(id);
     path.add(id);
-    const step = steps.find((s) => s.id === id);
-    for (const dep of step?.dependsOn || []) checkCycle(dep, new Set(path));
+    const step = byId.get(id);
+    for (const dep of step?.dependsOn || []) {
+      if (!byId.has(dep)) {
+        throw new Error(`Step '${id}' depends on unknown step '${dep}'`);
+      }
+      checkCycle(dep, new Set(path));
+    }
     path.delete(id);
   }
   for (const s of steps) checkCycle(s.id, new Set());
@@ -121,19 +137,24 @@ export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult
     const stepResults = await Promise.all(
       ready.map(async (step) => {
         const stepStart = Date.now();
+        const timeoutMs = (step.timeout || 60) * 1000;
+        let timedOut = false;
+        let timer: NodeJS.Timeout | undefined;
         try {
-          const timeoutMs = (step.timeout || 60) * 1000;
           // Inject predecessor results so dependencies see their context.
           const effectiveTask = buildStepTask(step, completed);
-          const result = await Promise.race([
-            runAgent(effectiveTask),
-            new Promise<never>((_, reject) =>
-              setTimeout(
-                () => reject(new Error(`Workflow step '${step.id}' timed out after ${timeoutMs}ms`)),
-                timeoutMs
-              )
-            ),
-          ]);
+          const runP = runAgent(effectiveTask, undefined, undefined, {
+            toolAllowlist: options.toolAllowlist,
+          });
+          const timeoutP = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              reject(new Error(`Workflow step '${step.id}' timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+            // unref so a hung step never blocks process exit
+            timer.unref?.();
+          });
+          const result = await Promise.race([runP, timeoutP]);
           const duration = Date.now() - stepStart;
           completed.set(step.id, result.answer);
           return {
@@ -150,9 +171,11 @@ export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult
             id: step.id,
             label: step.label,
             result: "",
-            error: msg,
+            error: timedOut ? `Timed out after ${timeoutMs}ms` : msg,
             durationMs: Date.now() - stepStart,
           };
+        } finally {
+          if (timer) clearTimeout(timer);
         }
       })
     );
@@ -164,4 +187,37 @@ export async function runWorkflow(steps: WorkflowStep[]): Promise<WorkflowResult
     steps: results,
     totalDurationMs: Date.now() - start,
   };
+}
+
+/** Up-front validation of a workflow definition. */
+function validateSteps(steps: WorkflowStep[]): void {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    throw new Error("Workflow must contain at least one step");
+  }
+  const ids = new Set<string>();
+  for (const s of steps) {
+    if (!s || typeof s !== "object") {
+      throw new Error("Each workflow step must be an object");
+    }
+    if (typeof s.id !== "string" || s.id.length === 0) {
+      throw new Error(`Workflow step id must be a non-empty string (got ${JSON.stringify(s)})`);
+    }
+    if (ids.has(s.id)) {
+      throw new Error(`Duplicate workflow step id: ${s.id}`);
+    }
+    ids.add(s.id);
+    if (typeof s.task !== "string" || s.task.length === 0) {
+      throw new Error(`Workflow step '${s.id}' requires a non-empty task`);
+    }
+    if (s.timeout !== undefined) {
+      if (!Number.isFinite(s.timeout) || s.timeout <= 0 || s.timeout > 3600) {
+        throw new Error(`Workflow step '${s.id}' timeout must be in (0, 3600] seconds`);
+      }
+    }
+    for (const dep of s.dependsOn || []) {
+      if (typeof dep !== "string") {
+        throw new Error(`Workflow step '${s.id}' dependencies must be strings`);
+      }
+    }
+  }
 }

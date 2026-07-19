@@ -76,9 +76,16 @@ export const randomGenTool: ToolDefinition = {
       }
 
       case "password": {
-        const len = (args.length as number) || 16;
+        const lenRaw = (args.length as number | undefined) ?? 16;
         const useUpper = args.uppercase !== false;
         const useSymbols = args.symbols !== false;
+        if (!Number.isFinite(lenRaw) || !Number.isInteger(lenRaw) || lenRaw < 1 || lenRaw > 1024) {
+          return textResult(
+            `Error: password length must be an integer in [1, 1024] (got ${JSON.stringify(lenRaw)})`,
+            true
+          );
+        }
+        const len = lenRaw;
         const lowercase = "abcdefghijklmnopqrstuvwxyz";
         const uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         const digits = "0123456789";
@@ -86,6 +93,9 @@ export const randomGenTool: ToolDefinition = {
         let charset = lowercase + digits;
         if (useUpper) charset += uppercase;
         if (useSymbols) charset += symbols;
+        if (charset.length < 4) {
+          return textResult("Error: password charset too small", true);
+        }
 
         const bytes = randomBytes(len);
         let password = "";
@@ -101,7 +111,14 @@ export const randomGenTool: ToolDefinition = {
         if (!Array.isArray(items) || items.length === 0) {
           return textResult("Error: 'items' array is required for pick operation", true);
         }
-        const count = Math.min((args.count as number) || 1, items.length);
+        const countRaw = (args.count as number | undefined) ?? 1;
+        if (!Number.isFinite(countRaw) || !Number.isInteger(countRaw) || countRaw < 1) {
+          return textResult(
+            `Error: pick count must be an integer in [1, ${items.length}] (got ${JSON.stringify(countRaw)})`,
+            true
+          );
+        }
+        const count = Math.min(countRaw, items.length);
         const shuffled = [...items];
         for (let i = shuffled.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));

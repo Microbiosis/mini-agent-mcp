@@ -1,8 +1,25 @@
-// Test run_agent in both modes (rule + LLM)
-process.env.LLM_API_KEY = "REDACTED-LONGCHAT-API-KEY-ROTATE-IN-VENDOR-CONSOLE";
-process.env.LLM_BASE_URL = "https://api.longcat.chat/openai";
-process.env.LLM_MODEL = "LongCat-2.0";
-process.env.AGENT_MAX_TURNS = "5";
+// Integration test: runAgent in rule + LLM modes.
+//
+// Environment:
+//   LLM_API_KEY  (required for the LLM-mode test; otherwise it is skipped)
+//   LLM_BASE_URL (default: https://api.longcat.chat/openai/v1)
+//   LLM_MODEL    (default: LongCat-2.0)
+//   AGENT_MAX_TURNS (default: 5)
+//
+// CRITICAL: No credentials are committed to this file. If a required env
+// value is missing the script logs a SKIP banner and exits 0 — it never
+// fails the build because of absent credentials.
+
+if (!process.env.LLM_API_KEY) {
+  console.log(
+    "[SKIP] test-agent requires LLM_API_KEY; set it in the environment (and revoke/rotate any previously committed key)." +
+      " Refusing to embed credentials in this file."
+  );
+  process.exit(0);
+}
+process.env.LLM_BASE_URL ??= "https://api.longcat.chat/openai/v1";
+process.env.LLM_MODEL ??= "LongCat-2.0";
+process.env.AGENT_MAX_TURNS ??= "5";
 
 const { runAgent } = await import("../dist/agent/react.js");
 
@@ -16,6 +33,7 @@ try {
   console.log("steps:", r1.steps.length);
 } catch (e) {
   console.log("ERROR:", e.message);
+  process.exit(1);
 }
 
 console.log("\n=== Test 2: runAgent in AUTO (LLM) mode ===");
@@ -31,6 +49,5 @@ try {
   }
 } catch (e) {
   console.log("ERROR:", e.message);
+  process.exit(1);
 }
-
-process.exit(0);
